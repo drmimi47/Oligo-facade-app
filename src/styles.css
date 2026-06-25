@@ -1,0 +1,714 @@
+/* ==========================================================================
+   styles.css — SINGLE SOURCE OF TRUTH for all visual presentation.
+
+   Per project policy (CLAUDE.md): every colour, size, spacing, and font lives
+   here as a CSS custom property with a descriptive comment. Components and the
+   canvas renderer READ these tokens; they never hardcode visual values.
+
+   ----------------------------------------------------------------------------
+   HOW THIS FILE IS ORGANISED
+   ----------------------------------------------------------------------------
+   1. THEME TOKENS (:root)         — the ACTIVE theme. Default is LIGHT.
+        · Colour · base surfaces
+        · Colour · text
+        · Colour · accents (semantic)
+        · Colour · controls
+        · Colour · canvas drawing tokens (read by core/renderer.ts)
+        · Typography
+        · Spacing
+        · Sizing
+   2. ALTERNATE THEMES             — optional overrides of the SAME colour tokens
+        · [data-theme="dark"]      — reintroduce dark mode by setting
+                                      <html data-theme="dark"> (no JS needed for
+                                      the styling itself). Non-colour tokens
+                                      (spacing/typography/sizing) are shared.
+   3. STYLESHEET                   — reset, layout, components. These reference
+                                     the tokens above and contain NO raw colours.
+
+   TO RESTYLE: edit the tokens in :root. The canvas renderer reads its drawing
+   tokens (prefixed --canvas-*, --grid-*, --vertex-*, etc.) from the .canvas
+   element via getComputedStyle, so changing a token value updates BOTH the DOM
+   UI and the canvas drawing. Keep that contract intact: any colour the renderer
+   reads must exist here as a token.
+   ========================================================================== */
+
+/* ==========================================================================
+   1. THEME TOKENS — ACTIVE THEME (LIGHT)
+   ========================================================================== */
+:root {
+  /* === COLOR · BASE SURFACES === */
+  --color-app-bg: #eef1f4;          /* Whole-app background (panel gutter) */
+  --color-panel-bg: #f7f9fb;        /* Tool panel background */
+  --color-panel-border: #d3dae1;    /* Panel / divider borders */
+  --color-statusbar-bg: #f1f4f7;    /* Bottom status bar background */
+
+  /* === COLOR · TEXT === */
+  --color-text: #1c2530;            /* Primary text (dark on light) */
+  --color-text-dim: #51606e;        /* Secondary / label text */
+  --color-text-faint: #8492a0;      /* Hints, units, disabled */
+  --color-text-on-accent: #ffffff;  /* Text drawn on a filled accent fill */
+
+  /* === COLOR · ACCENTS (semantic) === */
+  --color-accent: #1f6feb;          /* Primary accent — active controls, open segments */
+  --color-accent-warm: #c2700a;     /* Warm accent — rubber-band, insert, 45° lock */
+  --color-positive: #1f9d6b;        /* Closed perimeter, first-vertex affordance */
+  --color-danger: #d23154;          /* Destructive actions, selected vertex */
+  --color-danger-wash: rgba(210, 49, 84, 0.10); /* Tint behind danger hover */
+
+  /* === COLOR · CONTROLS === */
+  --control-bg: #ffffff;            /* Inputs / buttons background */
+  --control-bg-hover: #eef2f6;      /* Hover state */
+  --control-bg-active: #1f6feb;     /* Active segmented button fill */
+  --control-border: #c4ccd4;        /* Control borders */
+  --control-text: #1c2530;          /* Control text */
+
+  /* === COLOR · CANVAS DRAWING TOKENS (read by core/renderer.ts) === */
+  --canvas-bg: #ffffff;             /* Canvas background fill */
+  --grid-minor: #e3e8ed;            /* Minor grid lines (subtle) */
+  --grid-major: #c3ccd5;            /* Major grid lines (every 5th — clearly darker) */
+  --segment-color: #1f6feb;         /* Committed open polyline segments */
+  --segment-closed-color: #1f9d6b;  /* Segments once perimeter is closed */
+  --rubberband-color: #c2700a;      /* Live cursor-following segment */
+  --polygon-fill: rgba(31, 157, 107, 0.10); /* Closed perimeter fill */
+  --vertex-color: #3a4754;          /* Default vertex dot (dark, reads on white) */
+  --vertex-hover-color: #c2700a;    /* Hovered vertex */
+  --vertex-selected-color: #d23154; /* Selected vertex */
+  --vertex-first-color: #1f9d6b;    /* First vertex (close affordance) */
+  --insert-preview-color: #c2700a;  /* Insert-on-segment marker */
+  --handle-line-color: #8492a0;     /* Bézier handle leader line (anchor → knob) */
+  --handle-knob-color: #1f6feb;     /* Bézier handle control knob (square) */
+  --unravel-line-color: #1f6feb;    /* Unravelled straight edge (rectangle outline) */
+  --unravel-curve-color: #c2700a;   /* Unravelled curved edge (dashed rectangle outline) */
+  --unravel-rect-fill: rgba(31,111,235,0.10); /* Unravelled edge rectangle fill (space/panel) */
+  --unravel-cell-color: #8492a0;    /* Cell-split division lines inside a panel */
+  --unravel-highlight-fill: rgba(210,49,84,0.18); /* Hovered unravel rectangle fill */
+  --unravel-highlight-color: #d23154; /* Hovered unravel rect outline + linked shape edge (mini-window) */
+  /* Per-panel height editor (DOM <input> overlay sitting on each rectangle's left side) */
+  --unravel-input-bg: rgba(255, 255, 255, 0.94); /* Height input field background (subtle wash keeps the rotated number legible over the canvas) */
+  --unravel-input-text: #1c2530;    /* Height input field text */
+  --unravel-input-width: 52px;      /* Height input field width */
+  --label-text: #1c2530;            /* Canvas segment label text */
+  --label-bg: rgba(255, 255, 255, 0.88); /* Canvas segment label background */
+
+  /* === CANVAS · NON-COLOUR DRAWING TOKENS (read by core/renderer.ts) === */
+  --vertex-radius: 4;               /* Vertex dot radius (px, unitless for canvas) */
+  --handle-radius: 3.5;             /* Bézier handle knob half-size (px) */
+  --segment-width: 1.5;             /* Segment stroke width (px) */
+  --highlight-width: 3;             /* Hover-link highlight stroke width (px) — unravel strip + linked edge */
+  --unravel-top-width: 4;           /* Emphasised top edge of a hovered unravel rectangle (resize affordance) */
+  --grid-width: 1;                  /* Grid line width (px) */
+  --label-font: 12px ui-monospace, monospace; /* Canvas label font */
+
+  /* === TYPOGRAPHY === */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  --font-size-base: 13px;           /* Base UI text size */
+  --font-size-small: 11px;          /* Hints / help text */
+  --font-size-title: 15px;          /* Panel title */
+  --font-size-section: 11px;        /* Section headers */
+
+  /* === SPACING === */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  /* === SIZING === */
+  --panel-width: 280px;             /* Left tool panel width */
+  --statusbar-height: 30px;         /* Bottom status bar height */
+  --control-height: 28px;           /* Inputs / buttons height */
+  --radius: 4px;                    /* Corner radius for controls */
+  --radius-sm: 3px;
+
+  /* === MINI-WINDOW (saved perimeters) ===
+     Floating, draggable gallery overlaid on the top-right of the canvas. */
+  --mini-bg: rgba(247, 249, 251, 0.96);   /* Window body background (slightly translucent) */
+  --mini-border: #c4ccd4;                 /* Window + thumbnail border */
+  --mini-titlebar-bg: #eef2f6;            /* Title bar (drag handle) background */
+  --mini-title-text: #1c2530;            /* Title bar text */
+  --mini-thumb-bg: #ffffff;               /* Thumbnail canvas background (matches canvas) */
+  --mini-item-hover-bg: #eef2f6;          /* Saved-row hover background */
+  --mini-item-active-bg: rgba(31, 111, 235, 0.12); /* Loaded/active saved-row tint */
+  --mini-item-active-border: #1f6feb;     /* Loaded/active saved-row accent border */
+  --mini-stats-text: #51606e;            /* Per-thumbnail stats text */
+  --mini-shadow: 0 4px 16px rgba(28, 37, 48, 0.18); /* Window drop shadow */
+
+  --mini-width: 300px;                    /* Mini-window width (~1.5× — large enough to read a highlighted edge) */
+  --mini-offset: 12px;                    /* Inset from the top-right corner */
+  --mini-max-height: 60%;                 /* Cap height; body scrolls past this */
+  --mini-thumb-height: 130px;             /* Thumbnail canvas height (~1.55×) */
+
+  /* === MINI-WINDOW 3D (read by core/extrude3d.ts) ===
+     Colours/sizes for the extruded 3D massing drawn in each thumbnail: the
+     footprint extruded vertically into thin wall planes ONLY (no floor/roof
+     caps). Painter's-algorithm depth-sorted, drag-to-rotate camera. */
+  --m3d-wall-fill: #cfd8e0;               /* Vertical wall panel fill */
+  --m3d-wall-stroke: #7e8a96;             /* Wall panel edge stroke */
+  --m3d-highlight-fill: rgba(210, 49, 84, 0.35); /* Highlighted wall panel fill (hover-link) */
+  --m3d-highlight-stroke: #d23154;        /* Highlighted wall panel stroke (hover-link) */
+  --m3d-edge-width: 1;                    /* Face edge stroke width (px) */
+  --m3d-highlight-width: 2;               /* Highlighted wall stroke width (px) */
+}
+
+/* ==========================================================================
+   2. ALTERNATE THEMES — override ONLY the colour tokens.
+
+   Dark theme is preserved here for easy reintroduction: set
+   <html data-theme="dark"> to activate. Spacing / typography / sizing are
+   inherited from :root and intentionally NOT repeated. These values are the
+   app's previous dark palette, kept in sync with the token names above.
+   ========================================================================== */
+[data-theme="dark"] {
+  /* === COLOR · BASE SURFACES === */
+  --color-app-bg: #14171a;
+  --color-panel-bg: #1f242a;
+  --color-panel-border: #2c333b;
+  --color-statusbar-bg: #11151a;
+
+  /* === COLOR · TEXT === */
+  --color-text: #e6edf3;
+  --color-text-dim: #93a1b0;
+  --color-text-faint: #5d6b78;
+  --color-text-on-accent: #ffffff;
+
+  /* === COLOR · ACCENTS (semantic) === */
+  --color-accent: #7fb2ff;
+  --color-accent-warm: #ffb454;
+  --color-positive: #5cd6a0;
+  --color-danger: #ff5c7c;
+  --color-danger-wash: rgba(255, 92, 124, 0.12);
+
+  /* === COLOR · CONTROLS === */
+  --control-bg: #2a313a;
+  --control-bg-hover: #333c47;
+  --control-bg-active: #3a85ff;
+  --control-border: #3a434e;
+  --control-text: #e6edf3;
+
+  /* === COLOR · CANVAS DRAWING TOKENS === */
+  --canvas-bg: #1a1d21;
+  --grid-minor: #262b31;
+  --grid-major: #353d46;
+  --segment-color: #7fb2ff;
+  --segment-closed-color: #5cd6a0;
+  --rubberband-color: #ffb454;
+  --polygon-fill: rgba(92, 214, 160, 0.10);
+  --vertex-color: #cdd6e0;
+  --vertex-hover-color: #ffb454;
+  --vertex-selected-color: #ff5c7c;
+  --vertex-first-color: #5cd6a0;
+  --insert-preview-color: #ffb454;
+  --handle-line-color: #5d6b78;
+  --handle-knob-color: #7fb2ff;
+  --unravel-line-color: #7fb2ff;
+  --unravel-curve-color: #ffb454;
+  --unravel-rect-fill: rgba(127,178,255,0.12);
+  --unravel-cell-color: #93a1b0;
+  --unravel-highlight-fill: rgba(255,92,124,0.22);
+  --unravel-highlight-color: #ff5c7c;
+  --unravel-input-bg: rgba(26, 29, 33, 0.94);
+  --unravel-input-text: #e6edf3;
+  --label-text: #e6edf3;
+  --label-bg: rgba(20, 24, 28, 0.85);
+
+  /* === MINI-WINDOW (saved perimeters) — dark === */
+  --mini-bg: rgba(31, 36, 42, 0.96);
+  --mini-border: #3a434e;
+  --mini-titlebar-bg: #2a313a;
+  --mini-title-text: #e6edf3;
+  --mini-thumb-bg: #1a1d21;
+  --mini-item-hover-bg: #333c47;
+  --mini-item-active-bg: rgba(127, 178, 255, 0.16);
+  --mini-item-active-border: #7fb2ff;
+  --mini-stats-text: #93a1b0;
+  --mini-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+
+  /* === MINI-WINDOW 3D — dark === */
+  --m3d-wall-fill: #39424d;               /* Vertical wall panel fill */
+  --m3d-wall-stroke: #5d6b78;             /* Wall panel edge stroke */
+  --m3d-highlight-fill: rgba(255, 92, 124, 0.38); /* Highlighted wall panel fill (hover-link) */
+  --m3d-highlight-stroke: #ff5c7c;        /* Highlighted wall panel stroke (hover-link) */
+}
+
+/* ==========================================================================
+   3. STYLESHEET — components reference tokens only (no raw colours below).
+   ========================================================================== */
+
+/* === RESET / GLOBAL === */
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-app-bg);
+  overflow: hidden;
+}
+
+/* === APP LAYOUT === */
+.app {
+  display: grid;
+  grid-template-columns: var(--panel-width) 1fr;
+  height: 100%;
+  width: 100%;
+}
+
+/* === LEFT TOOL PANEL === */
+.panel {
+  background: var(--color-panel-bg);
+  border-right: 1px solid var(--color-panel-border);
+  padding: var(--space-3);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.panel__title {
+  font-size: var(--font-size-title);
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.panel__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-panel-border);
+}
+.panel__section:last-child { border-bottom: none; }
+.panel__section--help { margin-top: auto; }
+
+.panel__section-title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-dim);
+  font-weight: 600;
+}
+
+.panel__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.panel__row--checkbox { cursor: pointer; user-select: none; }
+
+.panel__label {
+  flex: 0 0 64px;
+  color: var(--color-text-dim);
+}
+
+.panel__unit {
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  width: 16px;
+}
+
+.panel__hint {
+  font-size: var(--font-size-small);
+  color: var(--color-text-faint);
+  line-height: 1.4;
+}
+
+/* === CONTROLS · INPUTS === */
+.panel__input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-family: var(--font-mono);
+  padding: 0 var(--space-2);
+}
+.panel__input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.panel__input:disabled { opacity: 0.45; }
+
+input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--color-accent);
+}
+
+/* === CONTROLS · BUTTONS === */
+.btn {
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+.btn:hover { background: var(--control-bg-hover); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn--danger { color: var(--color-danger); border-color: var(--color-danger); }
+.btn--danger:hover { background: var(--color-danger-wash); }
+.btn--primary {
+  background: var(--control-bg-active);
+  border-color: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+.btn--primary:hover { filter: brightness(1.06); background: var(--control-bg-active); }
+.btn--primary:disabled { filter: none; }
+
+/* === CONTROLS · SEGMENTED TOGGLE === */
+.segmented {
+  display: flex;
+  flex: 1;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.segmented__btn {
+  flex: 1;
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: none;
+  color: var(--control-text);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+}
+.segmented__btn + .segmented__btn { border-left: 1px solid var(--control-border); }
+.segmented__btn:hover { background: var(--control-bg-hover); }
+.segmented__btn.is-active { background: var(--control-bg-active); color: var(--color-text-on-accent); }
+.segmented__btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* === READOUTS (derived perimeter values) === */
+.readout {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+}
+.readout__key { color: var(--color-text-dim); }
+.readout__val { color: var(--color-text); }
+
+/* === HELP LIST === */
+.help {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-small);
+  color: var(--color-text-dim);
+  line-height: 1.4;
+}
+.help b { color: var(--color-text); font-weight: 600; }
+
+/* === RIGHT STAGE (canvas + status bar) === */
+.stage {
+  display: grid;
+  grid-template-rows: 1fr var(--statusbar-height);
+  height: 100%;
+  min-width: 0;
+}
+
+.canvas-wrap {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.canvas {
+  display: block;
+  cursor: crosshair;
+  touch-action: none; /* let pointer events drive pan/zoom, not the browser */
+}
+/* Canvas in UNRAVEL view: hovering a rectangle TOP edge advertises a vertical
+   resize. The input layer toggles this class on the canvas while a top edge is
+   hovered (or being dragged) so the cursor matches the drag-to-stretch action. */
+.canvas--ns-resize { cursor: ns-resize; }
+
+/* === UNRAVEL · PER-PANEL HEIGHT INPUT OVERLAY ===
+   DOM layer of <input type="number"> fields, one per unravel rectangle, absolutely
+   positioned over the canvas (synced to the viewport via toScreen on every paint).
+   Only the inputs capture pointer events; the overlay container is transparent to
+   them so canvas pan/zoom elsewhere is unaffected. All visual values are tokens. */
+.unravel-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* container never blocks canvas interaction */
+  overflow: hidden;
+}
+.unravel-input {
+  position: absolute;
+  pointer-events: auto; /* the field itself is interactive */
+  width: var(--unravel-input-width);
+  box-sizing: border-box;
+  /* Anchor (inline left/top) is the rectangle's LEFT edge at its vertical mid.
+     The number represents the panel's VERTICAL height, so the field is rotated
+     90° to read bottom-to-top (the standard convention for vertical dimension
+     text) and parked just OUTSIDE the rectangle's left side, centred on the
+     anchor. Built from the anchor outward:
+       1) translate(-50%, -50%) centres the box ON the anchor;
+       2) rotate(-90deg) turns it vertical (rotation is purely visual — the box
+          is absolutely positioned, so this doesn't reflow layout);
+       3) the trailing translateY pushes the (now-vertical) box left of the edge
+          with a small gap. After the -90° rotation the local +Y axis points to
+          screen-LEFT, so a positive Y offset = half the field width + 4px gap. */
+  transform: translate(-50%, -50%) rotate(-90deg)
+    translateY(calc(var(--unravel-input-width) / 2 + 4px));
+  background: var(--unravel-input-bg);
+  border: none; /* borderless: reads as a clean vertical dimension over the canvas */
+  border-radius: var(--radius-sm);
+  color: var(--unravel-input-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  text-align: center;
+  padding: 1px 3px;
+}
+.unravel-input:focus { outline: none; } /* no border affordance — stay borderless when editing */
+
+/* === UNRAVEL · CELL-SPLIT CONTEXT MENU ===
+   Right-click a panel to split it into N equal cells. Positioned in canvas-wrap
+   px (left/top set inline). Reuses panel/control tokens — no raw colours. */
+.cell-menu {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--color-panel-bg);
+  border: 1px solid var(--color-panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  font-size: var(--font-size-small);
+}
+.cell-menu__title {
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+.cell-menu__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-1);
+}
+.cell-menu__btn {
+  height: var(--control-height);
+  min-width: 34px;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+.cell-menu__btn:hover { background: var(--control-bg-hover); }
+.cell-menu__btn.is-active {
+  background: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+  border-color: var(--control-bg-active);
+}
+.cell-menu__custom {
+  display: flex;
+  gap: var(--space-1);
+}
+
+/* === STATUS BAR === */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--statusbar-height);
+  background: var(--color-statusbar-bg);
+  border-top: 1px solid var(--color-panel-border);
+  padding: 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  color: var(--color-text-dim);
+}
+.statusbar__item { white-space: nowrap; }
+.statusbar__item--accent { color: var(--color-accent-warm); }
+.statusbar__sep {
+  width: 1px;
+  height: 60%;
+  background: var(--color-panel-border);
+}
+.statusbar__spacer { flex: 1; }
+
+/* === MINI-WINDOW (saved perimeters) ===
+   Floating, draggable gallery overlaid on the canvas. Anchored top-right by
+   default (right/top inset); once dragged, inline left/top take over. Sits above
+   the canvas (z-index) but never blocks pointer events on the rest of the stage.
+   All visual values come from the --mini-* tokens above. */
+.mini {
+  position: absolute;
+  top: var(--mini-offset);
+  right: var(--mini-offset);
+  width: var(--mini-width);
+  max-height: var(--mini-max-height);
+  display: flex;
+  flex-direction: column;
+  background: var(--mini-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  overflow: hidden;
+  z-index: 10;
+  backdrop-filter: blur(2px);
+}
+
+.mini__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--control-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  background: var(--mini-titlebar-bg);
+  border-bottom: 1px solid var(--mini-border);
+  cursor: move;            /* advertise the drag-to-move affordance */
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+.mini__title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--mini-title-text);
+}
+
+.mini__body {
+  overflow-y: auto;        /* scroll the gallery when it overflows */
+  min-height: 0;
+  padding: var(--space-1);
+}
+
+.mini__empty {
+  font-size: var(--font-size-small);
+  color: var(--mini-stats-text);
+  line-height: 1.4;
+  padding: var(--space-2);
+}
+
+.mini__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.mini__item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "thumb thumb"
+    "meta  actions";
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+.mini__item:hover { background: var(--mini-item-hover-bg); }
+.mini__item.is-active {
+  background: var(--mini-item-active-bg);
+  border-color: var(--mini-item-active-border);
+}
+
+.mini__thumb {
+  grid-area: thumb;
+  display: block;
+  width: 100%;
+  height: var(--mini-thumb-height);
+  padding: 0;
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius-sm);
+  background: var(--mini-thumb-bg);
+  cursor: pointer;
+  overflow: hidden;
+}
+.mini__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;                    /* Affordance: drag the preview to rotate the 3D massing */
+  touch-action: none;             /* Let pointer events drive rotation, not browser gestures */
+}
+.mini__canvas:active { cursor: grabbing; }
+
+.mini__meta {
+  grid-area: meta;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.mini__name {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mini__name:hover { text-decoration: underline; }
+.mini__nameinput {
+  width: 100%;
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-base);
+  padding: 0 var(--space-1);
+}
+.mini__nameinput:focus { outline: none; }
+.mini__stats {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  color: var(--mini-stats-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini__actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Compact square icon buttons (collapse, rename, update, delete). */
+.mini__iconbtn {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  line-height: 1;
+}
+.mini__iconbtn:hover { background: var(--control-bg-hover); color: var(--color-text); }
+.mini__iconbtn:disabled { opacity: 0.35; cursor: not-allowed; }
+.mini__iconbtn--danger:hover { background: var(--color-danger-wash); color: var(--color-danger); }
