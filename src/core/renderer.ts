@@ -73,6 +73,18 @@ export interface RenderState {
    * hovered unravel strip). -1/undefined or out-of-range = no highlight.
    */
   highlightEdge?: number;
+  /**
+   * Placed floor-plate elevations (model Y). Each is drawn as a dotted horizontal
+   * line spanning the full canvas width at that elevation. Shown in BOTH the
+   * normal and unravel views (a level reference that pans/zooms with the scene).
+   */
+  floorPlates?: number[] | null;
+  /**
+   * Floor-plate placement preview: the cursor's current elevation (model Y) while
+   * the floor-plate tool is armed, drawn as a fainter "ghost" dotted line; null
+   * when the tool is off or the cursor is outside the canvas.
+   */
+  floorPlatePreview?: number | null;
 }
 
 /** Read a CSS custom property from an element, with a fallback. */
@@ -123,6 +135,20 @@ export function render(
     highlightW: cssNum(canvas, "--highlight-width", 3),
     unravelTopW: cssNum(canvas, "--unravel-top-width", 4),
     gridW: cssNum(canvas, "--grid-width", 1),
+    // Shared gap (px) between a panel border and its dimension label. Read from
+    // the same token the HEIGHT field's CSS transform uses, so the WIDTH label
+    // (above each panel) and the HEIGHT field (left of each panel) sit the SAME
+    // distance outside their borders. cssNum parses the leading number from "4px".
+    unravelLabelGap: cssNum(canvas, "--unravel-label-gap", 4),
+    // Floor-plate level lines: placed (solid colour) + ghosted placement preview.
+    floorPlate: cssVar(canvas, "--floorplate-color", "#7a8694"),
+    floorPlateGhost: cssVar(canvas, "--floorplate-ghost-color", "rgba(122,134,148,0.45)"),
+    floorPlateW: cssNum(canvas, "--floorplate-width", 1),
+    floorPlateDash: cssNum(canvas, "--floorplate-dash", 6),
+    floorPlateGap: cssNum(canvas, "--floorplate-dash-gap", 5),
+    // Gap (px) between the unravel strip's left edge and a floor-plate height
+    // label parked to its left (UNRAVEL view only — see drawFloorPlates).
+    floorPlateLabelGap: cssNum(canvas, "--floorplate-label-gap", 8),
   };
 
   // Reset transform and clear in device pixels.
@@ -145,6 +171,26 @@ export function render(
       state.hoveredUnravelEdge ?? -1,
       state.hoveredUnravelTop ?? -1,
       tk,
+    );
+    // Floor-plate level lines sit on top of the unravel rectangles. In the
+    // UNRAVEL view they are also LABELLED with their height (elevation above the
+    // panel baseline at model y = 0, which is the ground floor = height 0). The
+    // labels are parked just LEFT of the strip, so we pass the leftmost panel
+    // edge in model-x (min over all draws of min(seg.x0, seg.x1)); drawFloorPlates
+    // converts it to screen and right-aligns each marker just left of the strip.
+    let leftModelX = Infinity;
+    for (const { seg } of state.unravel) {
+      leftModelX = Math.min(leftModelX, seg.x0, seg.x1);
+    }
+    drawFloorPlates(
+      ctx,
+      canvas,
+      width,
+      state.viewport,
+      state.floorPlates ?? null,
+      state.floorPlatePreview ?? null,
+      tk,
+      Number.isFinite(leftModelX) ? leftModelX : null,
     );
     return;
   }
@@ -228,6 +274,77 @@ export function render(
       ctx.stroke();
     }
   });
+
+  // Floor-plate level lines on top of the shape. NORMAL view: lines only, no
+  // height labels (there's no meaningful ground datum here) — omit the leftmost
+  // edge so drawFloorPlates draws lines without elevation markers.
+  drawFloorPlates(ctx, canvas, width, state.viewport, state.floorPlates ?? null, state.floorPlatePreview ?? null, tk);
+}
+
+/**
+ * Draw horizontal floor-plate level lines: each placed elevation (and the live
+ * placement preview, fainter) becomes a dotted line spanning the full canvas
+ * width at its model-Y, converted to a screen Y through the viewport (so the
+ * lines pan/zoom with the scene). Placed lines use the solid floor-plate colour;
+ * the preview uses the ghost colour. No-ops when there's nothing to draw.
+ *
+ * HEIGHT LABELS (UNRAVEL view only): when `leftModelX` is provided (the leftmost
+ * unravelled panel edge in model-x), each plate is ALSO labelled with its height
+ * — its elevation above the panel baseline at model y = 0, the ground floor. Since
+ * the baseline is y = 0, that height is simply the plate's model-Y value. The
+ * marker is drawn just LEFT of the strip (right-aligned to sit neatly outside it,
+ * `--floorplate-label-gap` px clear of the leftmost panel edge), vertically centred
+ * on its line, so it never clashes with the panels or their dimension labels. When
+ * `leftModelX` is null/omitted (the NORMAL/shape view, which has no ground datum),
+ * only the lines are drawn — no labels.
+ */
+function drawFloorPlates(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  width: number,
+  vp: Viewport,
+  plates: number[] | null,
+  preview: number | null,
+  tk: {
+    floorPlate: string;
+    floorPlateGhost: string;
+    floorPlateW: number;
+    floorPlateDash: number;
+    floorPlateGap: number;
+    floorPlateLabelGap: number;
+  },
+  leftModelX: number | null = null,
+): void {
+  if ((!plates || plates.length === 0) && preview == null) return;
+
+  const line = (modelY: number, color: string): void => {
+    const sy = toScreen(vp, { x: 0, y: modelY }).y;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(width, sy);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = tk.floorPlateW;
+    ctx.stroke();
+  };
+
+  ctx.setLineDash([tk.floorPlateDash, tk.floorPlateGap]);
+  if (plates) for (const y of plates) line(y, tk.floorPlate);
+  // Preview last so it reads on top; skip if it coincides with a placed line.
+  if (preview != null) line(preview, tk.floorPlateGhost);
+  ctx.setLineDash([]);
+
+  // Height markers — UNRAVEL view only (leftModelX supplied). Right edge of each
+  // label sits `floorPlateLabelGap` px left of the strip's leftmost screen-x.
+  if (leftModelX == null) return;
+  const rightX = toScreen(vp, { x: leftModelX, y: 0 }).x - tk.floorPlateLabelGap;
+  // Datum: baseline (model y = 0) is height 0, so the marker text = the plate's
+  // model-Y, formatted to match the existing dimension labels (2 decimals, bare).
+  if (plates) for (const y of plates) {
+    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y }).y, y.toFixed(2));
+  }
+  if (preview != null) {
+    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y: preview }).y, preview.toFixed(2));
+  }
 }
 
 function drawGrid(
@@ -415,6 +532,7 @@ function drawUnravel(
     segmentW: number;
     highlightW: number;
     unravelTopW: number;
+    unravelLabelGap: number;
   },
 ): void {
   for (const { seg, height, cells } of draws) {
@@ -472,8 +590,10 @@ function drawUnravel(
       ctx.stroke();
     }
 
-    // Length label above the rectangle top, centred over its width.
-    drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - 4, seg.length.toFixed(2));
+    // Length (WIDTH) label above the rectangle top, centred over its width. Its
+    // bottom edge sits `unravelLabelGap` px above the top border — the SAME gap
+    // the HEIGHT field uses outside the left border (shared --unravel-label-gap).
+    drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - tk.unravelLabelGap, seg.length.toFixed(2));
   }
 }
 
@@ -494,6 +614,34 @@ function drawCenteredLabel(
   const w = ctx.measureText(text).width;
   const x = cx - (w + padding * 2) / 2;
   const y = bottomY - h;
+  ctx.fillStyle = bgc;
+  ctx.fillRect(x, y, w + padding * 2, h);
+  ctx.fillStyle = fg;
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + padding, y + h / 2);
+}
+
+/**
+ * Draw a small text label with a background plate whose RIGHT edge is at `rightX`
+ * and which is vertically CENTRED on `cy`. Used for floor-plate height markers
+ * parked just left of the unravel strip, so they read as a right-aligned column
+ * of elevations. Matches the look of the other dimension labels (same CSS tokens).
+ */
+function drawRightAlignedLabel(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  rightX: number,
+  cy: number,
+  text: string,
+): void {
+  const fg = cssVar(canvas, "--label-text", "#1c2530");
+  const bgc = cssVar(canvas, "--label-bg", "rgba(255,255,255,0.88)");
+  ctx.font = cssVar(canvas, "--label-font", "12px ui-monospace, monospace");
+  const padding = 4;
+  const h = 16;
+  const w = ctx.measureText(text).width;
+  const x = rightX - (w + padding * 2);
+  const y = cy - h / 2;
   ctx.fillStyle = bgc;
   ctx.fillRect(x, y, w + padding * 2, h);
   ctx.fillStyle = fg;

@@ -271,22 +271,67 @@ containing one `.unravel-input` `<input type=number>` per rectangle), NOT
 canvas-drawn text. Each input is **absolutely positioned** by converting its
 rectangle's left edge at vertical-mid to screen with `toScreen(viewport, {x: x0,
 y: height/2})`; CSS `transform: translate(-50%,-50%) rotate(-90deg) translateY(…)`
-parks it just outside the left edge, vertically centred, and **rotated 90°** so the
-number reads bottom-to-top (it represents the panel's vertical height). The field is
-**borderless** (no border in either theme; `outline: none` on focus too). Because `viewport` is React state and
-the component re-renders on pan/zoom/resize, the inputs **track the canvas**
-automatically (same triggers as `paint`). The container is `pointer-events: none`
-so only the inputs capture events — canvas pan/zoom elsewhere is unaffected.
-Typing updates a local draft (`unravelInputDraft`, keyed by edge) so clamping
-doesn't fight mid-edit; **Enter/blur commits** (clamp into `unravelHeights`, drop
-draft), **Esc cancels**. The overlay only mounts while `unravelOn` (auto cleanup
-on exit). This DOM-overlay-synced-to-canvas pattern is new to the app.
+parks it just **OUTSIDE** the left edge, vertically centred, and **rotated 90°** so
+the number reads bottom-to-top (it represents the panel's vertical height).
+
+The field is styled to **VISUALLY MATCH the canvas-drawn WIDTH length-label** above
+each panel — it is the vertical (height) counterpart to that horizontal (width)
+label, and both sit **outside** the rectangle as bare dimensions:
+- **Outside the panel** — parked left of the rectangle (anchor at `x0`, pushed out
+  by the trailing `translateY`), never overlapping the rectangle body. Because the
+  panel body sits to the RIGHT of the `x0` anchor and `rotate(-90deg)` maps the
+  field's local +Y to screen +X (right, into the panel), the `translateY` offset is
+  **NEGATIVE** so the box moves screen-LEFT, outside the left border. Its magnitude
+  is `half the field's CROSS axis + --unravel-label-gap`. The cross axis is the new
+  `--unravel-input-thickness` token (16px) — **not** the 52px `--unravel-input-width`:
+  after `rotate(-90deg)` it is the box HEIGHT (thickness) that runs along screen-X
+  and governs the border distance, while the 52px width becomes the vertical typing
+  run. The field's `height`/`line-height` are pinned to that thickness so the glyphs
+  fill it and the number's near edge lands exactly `--unravel-label-gap` from the
+  border. Thickness is matched to the canvas WIDTH label's plate height (16px), so the
+  X (width) and Y (height) dimension numbers read at the **SAME thickness, sit the
+  SAME gap outside their borders, and shift identically when zooming**. (Earlier the
+  offset used `--unravel-input-width/2`, which is the wrong, much larger axis — the
+  number floated ~30px out instead of ~4px; and before that a positive offset pushed
+  it onto the panel. Both fixed.) `--unravel-label-gap` (root token) is the single
+  shared source for that gap: the `.unravel-input` transform uses it here, and
+  `core/renderer.ts` reads it (via `cssNum`) in `drawUnravel` to offset the width
+  label (`topL.y - gap`), keeping the two dimension labels visually consistent.
+- **No border** (borderless; `outline: none` on focus too).
+- **No infill / no background** — `background: none`, so it reads as plain text like
+  the width label (the old `--unravel-input-bg` wash token was removed, light + dark).
+- **No spinner chevrons** — the `type=number` up/down arrows are hidden via CSS
+  (`::-webkit-inner/outer-spin-button { -webkit-appearance: none }` + Firefox
+  `appearance: textfield`). The input stays `type=number`; the numeric commit logic
+  (`parseFloat` in `commitPanelInput`) is unchanged.
+- **Matched type treatment** — uses the canvas label tokens (`font: var(--label-font)`,
+  `color: var(--unravel-input-text)` which now follows `--label-text`) so the two
+  read alike.
+
+Because `viewport` is React state and the component re-renders on pan/zoom/resize,
+the inputs **track the canvas** automatically (same triggers as `paint`). The
+container is `pointer-events: none` so only the inputs capture events — canvas
+pan/zoom elsewhere is unaffected. Typing updates a local draft (`unravelInputDraft`,
+keyed by edge) so clamping doesn't fight mid-edit; **Enter/blur commits** (clamp
+into `unravelHeights`, drop draft), **Esc cancels**. **Drag-to-stretch still live-
+updates** the displayed value: a top-edge drag sets `unravelHeights[edge]`, which
+re-renders the field's `value` from the resolved `height` (no draft active during a
+drag). The overlay only mounts while `unravelOn` (auto cleanup on exit). This
+DOM-overlay-synced-to-canvas pattern is new to the app.
 
 #### Zoom to a panel + split into cells
 
 - **Double-click a panel** → the viewport fits that single rectangle to fill the
   screen (`zoomToPanel` → `fitViewport(unravelBoundsPerimeter([seg], …), 56px margin)`).
   **Esc** exits the zoom (refits the whole strip) and `focusedPanel` is cleared.
+- The zoom-in (and Esc zoom-out, plus the unravel-on / gap / height re-fits) is
+  **animated**, not a jump: `animateViewport` tweens the viewport over ~280ms with a
+  cubic ease-in-out (`easeInOut` in `viewport.ts`). It's **focal-anchored** —
+  `lerpViewportFocal` interpolates scale geometrically (log-space, constant-rate zoom)
+  while easing the target-centre's on-screen position, so the focus doesn't drift.
+  The tween runs on `requestAnimationFrame`, snaps trivial moves instantly, and is
+  cancelled (`cancelAnim`) the moment the user pans/drags (pointer-down) or wheel-zooms,
+  and on unmount, so it never fights manual input.
 - **Right-click a panel** → a `.cell-menu` context menu (DOM overlay positioned in
   canvas-wrap px) to split the panel into **N equal-width vertical cells** (facade
   bays): presets 1/2/3/4/6/8 + a custom count. Cell counts are **per-panel**,
@@ -312,9 +357,14 @@ on exit). This DOM-overlay-synced-to-canvas pattern is new to the app.
   force a refit (the user is actively sizing).
 - **New CSS tokens** (`styles.css`, light + dark where colour-bearing):
   `--unravel-top-width` (emphasised hovered top edge, root token), and the height
-  input overlay `--unravel-input-bg / -text` (light+dark) and
-  `--unravel-input-width` (root). (The field is borderless, so there is no
-  `--unravel-input-border` token.)
+  input overlay `--unravel-input-text` (root; follows `--label-text`) and
+  `--unravel-input-width` (root). The field is borderless AND infill-free and reuses
+  the canvas `--label-font`/`--label-text` tokens to match the width label, so there
+  is no `--unravel-input-border` and no `--unravel-input-bg` token (the latter was
+  removed, light + dark). `--unravel-label-gap` (root) is the SHARED border-to-label
+  gap: the `.unravel-input` transform uses it (left of each panel) and `renderer.ts`
+  reads it for the width label (above each panel), so both dimensions sit the same
+  distance outside their borders.
 - **Length (width) is preserved exactly.** Straight edges use their chord length;
   curved (Bézier) edges use their true **arc length** (computed by summing the
   flattened curve), so a curved wall unrolls to a rectangle of the same running
@@ -399,6 +449,51 @@ token was removed as unused.
   and unchanged.
 - The **grid is now OFF by default** (`showGrid` initial state `false` in
   `PolylineTool`); the *Show grid* checkbox still toggles it on.
+
+## Floor plates (horizontal level lines)
+
+A **"floor plate"** button floats at the **bottom-left of the canvas**
+(`.floorplate-btn`, absolutely positioned in `.canvas-wrap`). Clicking it **arms**
+a placement tool (`floorPlateMode`); the button highlights (`.is-active`) while armed.
+
+- **Preview** — while armed, a **ghosted dotted horizontal line** tracks the
+  cursor's elevation across the full canvas width (`RenderState.floorPlatePreview`
+  = the cursor's model-Y; drawn in `--floorplate-ghost-color`).
+- **Place / remove** — a left-click on the canvas drops a floor plate at that
+  elevation (snapped to grid when snap is on); clicking on an existing plate (within
+  `HIT_TOLERANCE_PX`) removes it. **Place as many as wanted** — the tool stays armed.
+  **Esc** (or re-clicking the button) disarms it.
+- **Model-space, not screen-space** — plates are stored as **model-Y elevations**
+  (`floorPlates: number[]`, kept sorted), so they **pan/zoom with the scene** like a
+  real building level rather than drifting in screen pixels. Drawn in **both** the
+  normal and unravel views (on top), via `drawFloorPlates` in `renderer.ts`.
+- **Height labels — UNRAVEL view only.** Each floor-plate line (and the live ghost
+  preview while placing) is labelled with its **height**, but ONLY in the unravel
+  view, where the unrolled panels stand on a meaningful ground datum. The **datum is
+  the panel baseline at model y = 0 — the ground floor, height 0** — so a plate's
+  marker value is simply its model-Y elevation, formatted to match the existing
+  dimension labels (`toFixed(2)`, bare number). Markers are parked **off to the LEFT
+  of the unravelled strip**, right-aligned and vertically centred on their line, so
+  they never clash with the panels or their width/height dimension labels. The
+  renderer computes the **leftmost panel edge** in model-x (`min` over all
+  `state.unravel` draws of `min(seg.x0, seg.x1)`), converts it to screen, and draws
+  each label so its right edge sits `--floorplate-label-gap` px left of that edge.
+  In the **normal (shape) view the plates are unlabelled** (no ground datum):
+  `drawFloorPlates` takes an optional leftmost-model-x argument that is passed ONLY
+  from the unravel branch; absent ⇒ lines only (prior behaviour).
+- **New token** (`styles.css`, root, FLOOR PLATES group): `--floorplate-label-gap`
+  (px gap between the strip's left edge and the right edge of a height marker —
+  independently tunable from `--unravel-label-gap`). Marker text/background/font
+  reuse the shared canvas label tokens (`--label-text`, `--label-bg`,
+  `--label-font`), so the elevation markers read like the other dimension labels.
+- **Undoable** — placing/removing a plate is one undo step; `floorPlates` is part of
+  the `DocSnapshot` (alongside perimeter / heights / cells) and restored by `applyDoc`.
+  **Reset** clears plates and disarms the tool.
+- **CSS tokens** (`styles.css`, root): `--floorplate-color` (placed line),
+  `--floorplate-ghost-color` (preview), `--floorplate-width`, `--floorplate-dash`,
+  `--floorplate-dash-gap` (dash pattern), and `--floorplate-label-gap` (left-of-strip
+  height-marker gap, unravel view only). The button styling lives in `.floorplate-btn`
+  and reuses the control tokens (`--control-*`, `--mini-shadow`, accent when active).
 
 ## Visual styling — single source of truth
 

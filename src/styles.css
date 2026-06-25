@@ -83,10 +83,40 @@
   --unravel-cell-color: #8492a0;    /* Cell-split division lines inside a panel */
   --unravel-highlight-fill: rgba(210,49,84,0.18); /* Hovered unravel rectangle fill */
   --unravel-highlight-color: #d23154; /* Hovered unravel rect outline + linked shape edge (mini-window) */
-  /* Per-panel height editor (DOM <input> overlay sitting on each rectangle's left side) */
-  --unravel-input-bg: rgba(255, 255, 255, 0.94); /* Height input field background (subtle wash keeps the rotated number legible over the canvas) */
-  --unravel-input-text: #1c2530;    /* Height input field text */
-  --unravel-input-width: 52px;      /* Height input field width */
+
+  /* === FLOOR PLATES (horizontal level reference lines) ===
+     Dotted horizontal lines placed via the "floor plate" tool. Shown in both the
+     normal and unravel views, drawn at a fixed model elevation so they pan/zoom
+     with the scene. The ghost colour is the fainter live placement preview. */
+  --floorplate-color: #7a8694;        /* Placed floor-plate level line */
+  --floorplate-ghost-color: rgba(122,134,148,0.45); /* Placement preview (ghosted) */
+  /* UNRAVEL-VIEW ONLY: gap (px) between the LEFT edge of the unravelled panel
+     strip and the right edge of a floor-plate HEIGHT label parked to its left.
+     The height markers are drawn (canvas) just left of the strip, right-aligned,
+     so they never clash with the panels or their width/height dimension labels.
+     Independently tunable from --unravel-label-gap so the elevation markers can
+     be nudged without moving the panel dimension labels. */
+  --floorplate-label-gap: 8px;
+  /* Per-panel height editor (DOM <input> overlay parked OUTSIDE each rectangle's
+     left side). Styled to MATCH the canvas-drawn width length-label: plain text,
+     no border, NO infill/background — it reads as a bare vertical dimension, the
+     vertical counterpart to the horizontal width label above each panel. */
+  --unravel-input-text: var(--label-text); /* Height field text — matches the width label colour */
+  --unravel-input-width: 52px;      /* Height input field LONG axis (rotated vertical — the typing run length) */
+  /* Height field CROSS axis (its box height). After rotate(-90deg) THIS dimension
+     (not --unravel-input-width) runs along screen-X, so it — with the glyphs
+     filling it — governs how far the number sits from the panel's left border.
+     Matched to the canvas WIDTH label's plate height (16px) so the X (width) and
+     Y (height) dimension numbers read at the SAME thickness and sit the SAME gap
+     outside their borders. */
+  --unravel-input-thickness: 16px;
+  /* SHARED gap (px) between a panel's border and its dimension label, so the
+     WIDTH length-label (canvas-drawn, above each panel — read here by
+     core/renderer.ts via cssNum in drawUnravel) and the HEIGHT field (DOM
+     <input>, left of each panel — used in the .unravel-input transform below)
+     sit the SAME distance OUTSIDE their respective borders. Change once to
+     move both. */
+  --unravel-label-gap: 4px;
   --label-text: #1c2530;            /* Canvas segment label text */
   --label-bg: rgba(255, 255, 255, 0.88); /* Canvas segment label background */
 
@@ -97,6 +127,9 @@
   --highlight-width: 3;             /* Hover-link highlight stroke width (px) — unravel strip + linked edge */
   --unravel-top-width: 4;           /* Emphasised top edge of a hovered unravel rectangle (resize affordance) */
   --grid-width: 1;                  /* Grid line width (px) */
+  --floorplate-width: 1;            /* Floor-plate line stroke width (px) */
+  --floorplate-dash: 6;             /* Floor-plate dash length (px) */
+  --floorplate-dash-gap: 5;         /* Floor-plate gap between dashes (px) */
   --label-font: 12px ui-monospace, monospace; /* Canvas label font */
 
   /* === TYPOGRAPHY === */
@@ -207,8 +240,7 @@
   --unravel-cell-color: #93a1b0;
   --unravel-highlight-fill: rgba(255,92,124,0.22);
   --unravel-highlight-color: #ff5c7c;
-  --unravel-input-bg: rgba(26, 29, 33, 0.94);
-  --unravel-input-text: #e6edf3;
+  /* Height field text follows --label-text (set below), so no dark override needed here. */
   --label-text: #e6edf3;
   --label-bg: rgba(20, 24, 28, 0.85);
 
@@ -435,11 +467,42 @@ input[type="checkbox"] {
    hovered (or being dragged) so the cursor matches the drag-to-stretch action. */
 .canvas--ns-resize { cursor: ns-resize; }
 
+/* === FLOOR PLATE TOOL BUTTON ===
+   Floats at the BOTTOM-LEFT of the canvas. Toggles floor-plate placement mode;
+   when armed (.is-active) it adopts the accent colour and the canvas shows a
+   ghosted dotted preview line tracking the cursor's elevation. */
+.floorplate-btn {
+  position: absolute;
+  left: var(--space-3);
+  bottom: var(--space-3);
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  box-shadow: var(--mini-shadow);
+}
+.floorplate-btn:hover { background: var(--control-bg-hover); }
+.floorplate-btn.is-active {
+  background: var(--control-bg-active);
+  border-color: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+
 /* === UNRAVEL · PER-PANEL HEIGHT INPUT OVERLAY ===
-   DOM layer of <input type="number"> fields, one per unravel rectangle, absolutely
-   positioned over the canvas (synced to the viewport via toScreen on every paint).
-   Only the inputs capture pointer events; the overlay container is transparent to
-   them so canvas pan/zoom elsewhere is unaffected. All visual values are tokens. */
+   DOM layer of <input> fields, one per unravel rectangle, absolutely positioned
+   over the canvas (synced to the viewport via toScreen on every paint). Only the
+   inputs capture pointer events; the overlay container is transparent to them so
+   canvas pan/zoom elsewhere is unaffected.
+
+   The field is styled to MATCH the canvas-drawn WIDTH length-label: bare text with
+   NO border, NO infill/background, and NO number-spinner chevrons — the vertical
+   (height) counterpart to the horizontal (width) label, both sitting OUTSIDE the
+   rectangle. It uses the canvas label font/colour tokens so the two read alike.
+   All visual values are tokens. */
 .unravel-overlay {
   position: absolute;
   inset: 0;
@@ -460,20 +523,45 @@ input[type="checkbox"] {
        2) rotate(-90deg) turns it vertical (rotation is purely visual — the box
           is absolutely positioned, so this doesn't reflow layout);
        3) the trailing translateY pushes the (now-vertical) box left of the edge
-          with a small gap. After the -90° rotation the local +Y axis points to
-          screen-LEFT, so a positive Y offset = half the field width + 4px gap. */
+          with a small gap. Under rotate(-90deg) the local +Y axis maps to
+          screen +X (RIGHT, INTO the panel, whose body sits right of the x0
+          anchor), so the offset must be NEGATIVE to move the box screen-LEFT,
+          OUTSIDE the left border. Magnitude = half the field's CROSS axis
+          (--unravel-input-thickness — this is the box dimension that runs along
+          screen-X AFTER the 90° rotation, NOT the 52px width, which becomes the
+          vertical typing run) + --unravel-label-gap. With the glyphs filling the
+          thickness, the number's near edge ends up exactly --unravel-label-gap
+          from the border. That gap (and now the thickness, matched to the width
+          label's plate height) is shared with the renderer's width label, so the
+          X (width) and Y (height) dimension numbers sit the SAME distance outside
+          their borders and shift identically when zooming. */
   transform: translate(-50%, -50%) rotate(-90deg)
-    translateY(calc(var(--unravel-input-width) / 2 + 4px));
-  background: var(--unravel-input-bg);
-  border: none; /* borderless: reads as a clean vertical dimension over the canvas */
-  border-radius: var(--radius-sm);
+    translateY(calc(-1 * (var(--unravel-input-thickness) / 2 + var(--unravel-label-gap))));
+  background: none;     /* no infill — reads as plain text like the width label */
+  border: none;         /* borderless: a clean vertical dimension over the canvas */
   color: var(--unravel-input-text);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-small);
+  font: var(--label-font); /* match the canvas width length-label font exactly */
   text-align: center;
-  padding: 1px 3px;
+  /* Fix the cross-axis so the offset math is deterministic and the glyphs fill
+     the thickness (so their near edge lands at --unravel-label-gap, like the
+     width label's plate). The 52px width stays the vertical typing run. */
+  height: var(--unravel-input-thickness);
+  line-height: var(--unravel-input-thickness);
+  padding: 0;
 }
-.unravel-input:focus { outline: none; } /* no border affordance — stay borderless when editing */
+.unravel-input:focus { outline: none; } /* no border/box affordance when editing */
+/* Hide the type=number spinner chevrons so the field is pure text like the width
+   label (the up/down arrows would otherwise sit inside the rotated field). The
+   numeric commit logic (parseFloat in commitPanelInput) is unaffected. */
+.unravel-input::-webkit-outer-spin-button,
+.unravel-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.unravel-input {
+  -moz-appearance: textfield; /* Firefox: drop the spinner */
+  appearance: textfield;
+}
 
 /* === UNRAVEL · CELL-SPLIT CONTEXT MENU ===
    Right-click a panel to split it into N equal cells. Positioned in canvas-wrap

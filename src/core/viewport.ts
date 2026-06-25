@@ -73,6 +73,35 @@ function clampScale(s: number): number {
   return Math.max(2, Math.min(2000, s));
 }
 
+/** Cubic ease-in-out (slow start, slow stop) for smooth viewport animations. */
+export function easeInOut(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * Interpolate between two viewports for an animated zoom, at parameter `t` in
+ * [0,1], keeping a model ANCHOR point's motion natural:
+ *   - scale moves GEOMETRICALLY (log-space), which reads as a constant-rate
+ *     zoom rather than the rushed-then-crawl of a linear scale lerp;
+ *   - the anchor's ON-SCREEN position eases linearly from where it starts to
+ *     where the target places it, so the focal point doesn't drift/swim.
+ * Pass `t` already eased (e.g. via easeInOut) for slow-in/slow-out.
+ */
+export function lerpViewportFocal(
+  from: Viewport,
+  to: Viewport,
+  anchor: Point,
+  t: number,
+): Viewport {
+  const scale = from.scale * Math.pow(to.scale / from.scale, t);
+  const s0 = toScreen(from, anchor);
+  const s1 = toScreen(to, anchor);
+  const sx = s0.x + (s1.x - s0.x) * t;
+  const sy = s0.y + (s1.y - s0.y) * t;
+  // Solve origin so toScreen(vp, anchor) === (sx, sy) at this scale.
+  return { scale, originX: sx - anchor.x * scale, originY: sy + anchor.y * scale };
+}
+
 /**
  * Compute a viewport that FITS a perimeter's bounds into a `width`×`height`
  * canvas, leaving `marginPx` of padding on every side, and centres it.

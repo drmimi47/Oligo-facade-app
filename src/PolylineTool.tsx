@@ -39,7 +39,7 @@ import {
   makeSegmentArc,
   clearVertexHandles,
 } from "./core/perimeterOps";
-import { defaultViewport, toScreen, toModel, pixelsToModel, zoomAt, pan, fitViewport, type Viewport } from "./core/viewport";
+import { defaultViewport, toScreen, toModel, pixelsToModel, zoomAt, pan, fitViewport, easeInOut, lerpViewportFocal, type Viewport } from "./core/viewport";
 import { render, type RenderState, type UnravelDraw } from "./core/renderer";
 import { unravelPerimeter, unravelBoundsPerimeter, type UnravelSegment } from "./core/unravel";
 import { DEFAULT_WALL_HEIGHT_FT } from "./core/extrude3d";
@@ -82,6 +82,8 @@ interface DocSnapshot {
   unravelHeights: Record<number, number>;
   unravelCells: Record<number, number>;
   unravelHeight: number;
+  /** Placed floor-plate elevations (model Y). Replaced, never mutated. */
+  floorPlates: number[];
 }
 
 export default function PolylineTool() {
@@ -93,6 +95,56 @@ export default function PolylineTool() {
 
   // --- VIEWPORT ---
   const [viewport, setViewport] = useState<Viewport>(() => defaultViewport(800, 600));
+  // Always-current viewport, so the zoom animator can read the live start state
+  // without a stale closure.
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+  // requestAnimationFrame id for an in-flight viewport tween (null = none).
+  const animRef = useRef<number | null>(null);
+
+  /** Cancel any in-flight viewport animation (e.g. when the user takes over). */
+  const cancelAnim = useCallback(() => {
+    if (animRef.current !== null) {
+      cancelAnimationFrame(animRef.current);
+      animRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Smoothly animate the viewport to `target` (ease-in-out, focal-anchored) so
+   * double-click zoom / Esc-out aren't jarring jumps. The anchor is the model
+   * point the target centres on, so the zoom homes in on it. Trivial moves snap
+   * instantly; any in-flight tween is cancelled first.
+   */
+  const animateViewport = useCallback((target: Viewport, duration = 280) => {
+    cancelAnim();
+    const from = viewportRef.current;
+    const { w, h } = sizeRef.current;
+    const anchor = toModel(target, w / 2, h / 2);
+    if (
+      Math.abs(from.scale - target.scale) < 1e-3 &&
+      Math.abs(from.originX - target.originX) < 0.5 &&
+      Math.abs(from.originY - target.originY) < 0.5
+    ) {
+      setViewport(target);
+      return;
+    }
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      if (t >= 1) {
+        setViewport(target);
+        animRef.current = null;
+        return;
+      }
+      setViewport(lerpViewportFocal(from, target, anchor, easeInOut(t)));
+      animRef.current = requestAnimationFrame(step);
+    };
+    animRef.current = requestAnimationFrame(step);
+  }, [cancelAnim]);
+
+  // Stop any running tween if the component unmounts mid-animation.
+  useEffect(() => () => cancelAnim(), [cancelAnim]);
 
   // --- TOOL / PRECISION SETTINGS ---
   const [mode, setMode] = useState<Mode>("draw");
@@ -133,6 +185,16 @@ export default function PolylineTool() {
   // or null when closed. `cellMenuDraft` backs the custom-count input.
   const [cellMenu, setCellMenu] = useState<{ edge: number; x: number; y: number } | null>(null);
   const [cellMenuDraft, setCellMenuDraft] = useState("");
+
+  // --- FLOOR PLATES (horizontal level reference lines) ---
+  // Placed floor-plate elevations stored in MODEL Y (so they pan/zoom with the
+  // geometry instead of drifting in screen space — a floor level is a fixed
+  // elevation). Drawn as ghosted dotted horizontal lines spanning the canvas.
+  const [floorPlates, setFloorPlates] = useState<number[]>([]);
+  // When armed, the "floor plate" tool shows a ghosted preview line tracking the
+  // cursor's elevation; a left-click drops a plate there (click an existing plate
+  // to remove it). Place as many as wanted. Esc / clicking the button disarms it.
+  const [floorPlateMode, setFloorPlateMode] = useState(false);
 
   // --- TRANSIENT INTERACTION STATE ---
   const [cursorModel, setCursorModel] = useState<Point | null>(null);
@@ -184,8 +246,8 @@ export default function PolylineTool() {
   const [redoStack, setRedoStack] = useState<DocSnapshot[]>([]);
   // Always-current document snapshot, refreshed every render, so the capture and
   // undo/redo helpers read fresh values without stale-closure bugs.
-  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, unravelHeight });
-  docRef.current = { perimeter, unravelHeights, unravelCells, unravelHeight };
+  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, unravelHeight, floorPlates });
+  docRef.current = { perimeter, unravelHeights, unravelCells, unravelHeight, floorPlates };
   // Pre-interaction snapshot for a drag / field edit, pushed on the FIRST actual
   // change (so a no-op press/focus never creates an empty undo step).
   const pendingRef = useRef<DocSnapshot | null>(null);
@@ -217,6 +279,7 @@ export default function PolylineTool() {
     setUnravelHeights(d.unravelHeights);
     setUnravelCells(d.unravelCells);
     setUnravelHeight(d.unravelHeight);
+    setFloorPlates(d.floorPlates);
     setSelectedVertex(-1);
     setHoveredVertex(-1);
     setInsertPreview(null);
@@ -371,10 +434,11 @@ export default function PolylineTool() {
       const { w, h } = sizeRef.current;
       const h0 = effectiveHeight(edge);
       // Fit just this rectangle with a comfortable margin so it fills the screen.
-      setViewport(fitViewport(unravelBoundsPerimeter([seg], () => h0), w, h, 56));
+      // Animate the transition so the zoom-in glides instead of snapping.
+      animateViewport(fitViewport(unravelBoundsPerimeter([seg], () => h0), w, h, 56));
       setFocusedPanel(edge);
     },
-    [unravelResult, effectiveHeight],
+    [unravelResult, effectiveHeight, animateViewport],
   );
 
   /** Set a panel's cell-split count (>= 1), keyed by original edge index. */
@@ -399,9 +463,10 @@ export default function PolylineTool() {
       const { w, h } = sizeRef.current;
       const heightOf = (s: UnravelSegment) => heights[s.index] ?? defaultHeight;
       // Generous margin so the per-segment length labels above the strip fit.
-      setViewport(fitViewport(unravelBoundsPerimeter(res.segments, heightOf), w, h, 48));
+      // Animate so exiting a double-click zoom (Esc) eases back out smoothly.
+      animateViewport(fitViewport(unravelBoundsPerimeter(res.segments, heightOf), w, h, 48));
     },
-    [perimeter],
+    [perimeter, animateViewport],
   );
 
   // ---------------------------------------------------------------------------
@@ -416,8 +481,30 @@ export default function PolylineTool() {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
 
+      // A press means the user is taking over: stop any running zoom animation
+      // so it doesn't fight their input.
+      cancelAnim();
+
       // Any press on the canvas dismisses an open cell-split menu.
       if (cellMenu) setCellMenu(null);
+
+      // FLOOR PLATE tool: while armed, a left-click drops a horizontal level line
+      // at the cursor's elevation (or removes one already there). Takes precedence
+      // over draw/edit. Other buttons (middle = pan) fall through unaffected.
+      if (floorPlateMode && e.button === 0) {
+        const mu = toModel(viewport, sx, sy);
+        const yModel = snapEnabled ? snapPoint(mu, gridSpacing).y : mu.y;
+        const tolModel = pixelsToModel(viewport, HIT_TOLERANCE_PX);
+        recordHistory(); // place/remove is one undoable step
+        setFloorPlates((plates) => {
+          const hit = plates.findIndex((p) => Math.abs(p - yModel) <= tolModel);
+          // Click on an existing plate removes it; otherwise add a new one (kept
+          // sorted bottom→top for tidy iteration).
+          if (hit >= 0) return plates.filter((_, i) => i !== hit);
+          return [...plates, yModel].sort((a, b) => a - b);
+        });
+        return;
+      }
 
       // Middle button or space-less: pan with middle mouse.
       if (e.button === 1) {
@@ -665,7 +752,7 @@ export default function PolylineTool() {
         }
       }
     },
-    [drawing, mode, perimeter, viewport, eventToModel, unravelOn, hitUnravelPanel, zoomToPanel, recordHistory],
+    [drawing, mode, perimeter, viewport, eventToModel, unravelOn, hitUnravelPanel, zoomToPanel, recordHistory, cancelAnim, floorPlateMode, snapEnabled, gridSpacing],
   );
 
   /** Right-click a panel in the unravel view to open the cell-split menu. */
@@ -691,13 +778,14 @@ export default function PolylineTool() {
   );
 
   const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    cancelAnim(); // manual zoom interrupts any running animation
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
     const anchorX = e.clientX - rect.left;
     const anchorY = e.clientY - rect.top;
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     setViewport((vp) => zoomAt(vp, anchorX, anchorY, factor));
-  }, []);
+  }, [cancelAnim]);
 
   // ---------------------------------------------------------------------------
   // SAVE / LOAD / DELETE / RENAME / UPDATE saved perimeters.
@@ -808,6 +896,12 @@ export default function PolylineTool() {
           setMode("edit");
         }
       } else if (e.key === "Escape") {
+        // Esc first disarms the floor-plate tool if it's active.
+        if (floorPlateMode) {
+          setFloorPlateMode(false);
+          (document.activeElement as HTMLElement)?.blur?.();
+          return;
+        }
         // In the unravel view, Esc first dismisses the cell menu, then exits a
         // double-click zoom (restoring the full-strip fit).
         if (unravelOn && (cellMenu || focusedPanel !== null)) {
@@ -865,6 +959,7 @@ export default function PolylineTool() {
     undo,
     redo,
     recordHistory,
+    floorPlateMode,
   ]);
 
   // ---------------------------------------------------------------------------
@@ -939,6 +1034,9 @@ export default function PolylineTool() {
       unravel: unravelDraws,
       hoveredUnravelEdge,
       hoveredUnravelTop,
+      floorPlates,
+      // Ghosted preview line follows the cursor's elevation while the tool is armed.
+      floorPlatePreview: floorPlateMode && cursorModel ? cursorModel.y : null,
     };
     render(ctx, canvas, w, h, dpr, state);
   }, [
@@ -956,6 +1054,8 @@ export default function PolylineTool() {
     unravelDraws,
     hoveredUnravelEdge,
     hoveredUnravelTop,
+    floorPlates,
+    floorPlateMode,
   ]);
 
   useEffect(() => {
@@ -993,6 +1093,8 @@ export default function PolylineTool() {
     setUnravelCells({});
     setFocusedPanel(null);
     setCellMenu(null);
+    setFloorPlates([]);
+    setFloorPlateMode(false);
   };
 
   /** Whether the current shape has enough edges to unravel. */
@@ -1348,6 +1450,7 @@ export default function PolylineTool() {
             <li><b>Ctrl+Z / Ctrl+Y</b> undo / redo (Ctrl+Shift+Z also redoes)</li>
             <li><b>Ctrl+S</b> save perimeter → mini-window (top-right)</li>
             <li><b>Unravel ⟳</b> unroll edges clockwise into equal-length strips</li>
+            <li><b>Floor plate</b> (bottom-left) place horizontal level lines · click a line to remove · Esc to finish</li>
             <li><b>Unravel:</b> drag a panel top to resize · double-click a panel to zoom · right-click to split into cells · Esc to exit zoom</li>
             <li><b>Mini-window:</b> click load · drag title to move · ✎ rename · ⤓ update · × delete</li>
           </ul>
@@ -1372,6 +1475,18 @@ export default function PolylineTool() {
             onWheel={onWheel}
             onContextMenu={onContextMenu}
           />
+          {/* FLOOR PLATE tool button — floats at the bottom-left of the canvas.
+              Toggles placement mode: while active a ghosted dotted horizontal line
+              tracks the cursor and a click drops a floor plate (click an existing
+              one to remove). Place as many as wanted; Esc or re-click disarms. */}
+          <button
+            className={`floorplate-btn ${floorPlateMode ? "is-active" : ""}`}
+            onClick={() => setFloorPlateMode((on) => !on)}
+            title="Place horizontal floor-plate level lines. Click the canvas to drop one (click a line to remove). Esc to finish."
+            aria-pressed={floorPlateMode}
+          >
+            Floor plate{floorPlates.length > 0 ? ` · ${floorPlates.length}` : ""}
+          </button>
           {/* UNRAVEL · per-panel height inputs. A DOM overlay (NOT canvas-drawn) of
               one <input> per rectangle, positioned by converting each rectangle's
               left edge at its vertical mid to screen via toScreen(viewport). Because
