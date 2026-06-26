@@ -29,17 +29,18 @@
 
 import type { Perimeter } from "./geometry";
 import { flattenPerimeter, flattenSegment } from "./geometry";
+import { buildSunPathGeometry, type SolarSettings, type SunPathGeometry, type V3 } from "./solar";
 
 // ---------------------------------------------------------------------------
 // UNIT / HEIGHT ASSUMPTION
 //
-// The app's units are abstract ("u"). For the 3D massing we adopt the simplest
-// mapping: 1 model unit = 1 foot. So the default wall height of ~10 feet is
-// simply 10 model units. Change this single constant to retune the height.
+// The app's unit system is defined in core/units.ts: 1 model unit = 1 FOOT
+// (real-world, not abstract). So the default wall height of 13 feet is simply
+// 13 model units. Change this single constant to retune the height.
 // ---------------------------------------------------------------------------
 
 /** Default wall extrusion height in feet (== model units, under 1u = 1ft). */
-export const DEFAULT_WALL_HEIGHT_FT = 10;
+export const DEFAULT_WALL_HEIGHT_FT = 13;
 
 /** A point in 3D model space (X east, Y north, Z up). */
 interface Vec3 {
@@ -187,8 +188,9 @@ function buildEdgeMap(p: Perimeter, outlineLen: number): number[] {
 //
 // A simple fixed camera that views the massing from slightly above and to the
 // side (an isometric-ish look). We rotate the 3D point about Z (azimuth) then
-// tilt about X (elevation), then take the rotated X (right) and a combination of
-// the rotated Y/Z (screen up) as the 2D coordinates. Depth is the rotated Y so
+// tilt the camera up and over by elevation so it looks DOWN, taking the rotated X
+// (right) and a sign-consistent combination of the rotated Y/Z as the 2D screen
+// coordinates. Depth combines the same Y/Z (forward adds, height subtracts) so
 // nearer faces sort in front. This is an orthographic projection — predictable
 // and parallel-edged, which reads well for a small massing diagram (no perspective
 // distortion at thumbnail scale). Cheap, no matrices/libraries needed.
@@ -197,15 +199,27 @@ function buildEdgeMap(p: Perimeter, outlineLen: number): number[] {
 export interface Camera {
   /** Rotation about the vertical (Z) axis, radians. Spins the model. */
   azimuth: number;
-  /** Tilt from horizontal, radians (0 = side-on, PI/2 = top-down). */
+  /**
+   * Tilt of the camera above the horizon, radians. Positive tilts the camera UP
+   * and over the model so it looks DOWN onto it: 0 = side-on (eye level), and
+   * +PI/2 = straight-down top-down (plan). Negative would look UP from below.
+   */
   elevation: number;
 }
 
-/** A pleasant default 3/4 view: rotated ~35° and looking down ~30°. */
+/** A pleasant default 3/4 view: rotated ~-36° and looking DOWN ~30° from above. */
 export const DEFAULT_CAMERA: Camera = {
   azimuth: -Math.PI / 5, // ~-36°
-  elevation: Math.PI / 6, // 30° down-tilt
+  elevation: Math.PI / 6, // 30° above horizon -> looks down onto the massing
 };
+
+/**
+ * Exact top-down / aerial (plan) camera: elevation = PI/2 looks straight down
+ * (collapsing the massing into its flat footprint), azimuth = 0 gives a clean
+ * north-up plan regardless of any prior spin. Used by the double-click "aerial
+ * view" toggle in both the mini-window thumbnail and the Solar Study popup.
+ */
+export const PLAN_CAMERA: Camera = { azimuth: 0, elevation: Math.PI / 2 };
 
 /**
  * Project a 3D model point to 2D (pre-fit) coordinates with a depth value.
@@ -218,14 +232,23 @@ function project(pt: Vec3, cam: Camera): Projected {
   const rx = pt.x * ca - pt.y * sa;
   const ry = pt.x * sa + pt.y * ca;
   const rz = pt.z;
-  // Tilt about X (elevation): fold the ground toward the viewer and lift Z.
+  // Tilt the camera UP and over the model by `elevation` so it looks DOWN onto it.
   const ce = Math.cos(cam.elevation);
   const se = Math.sin(cam.elevation);
-  // Screen X = rotated right axis. Screen Y (up) = lifted Z minus folded depth.
-  // Depth = how far "into" the screen (used only for back-to-front sorting).
+  // Screen X = rotated right axis (unaffected by the tilt).
+  //
+  // Screen-up combines the lifted Z with the folded forward (north) axis with the
+  // SAME sign, so that as the camera tilts down (elevation -> +PI/2) BOTH wall tops
+  // AND points farther from the camera (larger ry, "north") rise on screen — the
+  // from-above read where the footprint tilts toward the viewer. At elevation 0 it
+  // is pure Z (side-on); at +PI/2 it is pure ry (north-up plan).
+  //
+  // Depth = distance INTO the screen for back-to-front sorting. Forward (ry) adds
+  // depth while height (rz) SUBTRACTS it, so when looking down the roof/top is
+  // NEARER than the base — correct occlusion for a view from above.
   const screenX = rx;
-  const screenUp = rz * ce - ry * se;
-  const depth = ry * ce + rz * se;
+  const screenUp = rz * ce + ry * se;
+  const depth = ry * ce - rz * se;
   return { x: screenX, y: screenUp, depth };
 }
 
@@ -302,6 +325,65 @@ function cssNum(el: HTMLElement, name: string, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+/** An RGBA colour, channels 0–255, alpha 0–1. (Internal to the fog blend.) */
+interface RGBA {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/**
+ * Parse a CSS colour STRING into {r,g,b,a}. Dependency-free, mirroring the
+ * cssVar/cssNum helper style: we only need the formats the tokens in this codebase
+ * actually use — `#rgb`, `#rrggbb`, and `rgb()/rgba()`. Anything unrecognised falls
+ * back to opaque black so a bad token degrades visibly rather than throwing.
+ */
+function parseColor(str: string): RGBA {
+  const s = str.trim();
+  // Hex: #rgb or #rrggbb.
+  if (s[0] === "#") {
+    const hex = s.slice(1);
+    if (hex.length === 3) {
+      // Shorthand #rgb -> each nibble doubled (e.g. f -> ff).
+      const r = parseInt(hex[0] + hex[0], 16);
+      const g = parseInt(hex[1] + hex[1], 16);
+      const b = parseInt(hex[2] + hex[2], 16);
+      return { r, g, b, a: 1 };
+    }
+    if (hex.length === 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return { r, g, b, a: 1 };
+    }
+  }
+  // Functional rgb()/rgba(): pull the comma/space-separated channel numbers.
+  const m = s.match(/rgba?\(([^)]+)\)/i);
+  if (m) {
+    const parts = m[1].split(/[,\s/]+/).map((p) => parseFloat(p)).filter((n) => Number.isFinite(n));
+    if (parts.length >= 3) {
+      return { r: parts[0], g: parts[1], b: parts[2], a: parts.length >= 4 ? parts[3] : 1 };
+    }
+  }
+  return { r: 0, g: 0, b: 0, a: 1 };
+}
+
+/**
+ * Linearly interpolate colour `a` toward colour `b` by `t` (0 = all a, 1 = all b),
+ * blending in RGB (and alpha), and return a CSS `rgba(...)` string. Used for the
+ * atmospheric fog: blending the parsed wall colour toward the parsed fog colour by
+ * a small depth-driven amount. Kept tiny and allocation-light — the three fixed
+ * colours are parsed ONCE by the caller, so this only does arithmetic per face.
+ */
+function mixColor(a: RGBA, b: RGBA, t: number): string {
+  const r = Math.round(a.r + (b.r - a.r) * t);
+  const g = Math.round(a.g + (b.g - a.g) * t);
+  const bl = Math.round(a.b + (b.b - a.b) * t);
+  const al = a.a + (b.a - a.a) * t;
+  return `rgba(${r}, ${g}, ${bl}, ${al})`;
+}
+
 /** Options for {@link render3d}. */
 export interface Render3dOptions {
   /** Padding (canvas px) around the massing inside the thumbnail. */
@@ -322,10 +404,30 @@ export interface Render3dOptions {
   /** Camera orientation. Defaults to {@link DEFAULT_CAMERA}. */
   camera?: Camera;
   /**
-   * Original perimeter edge index to highlight (the wall panel lit when the user
-   * hovers the matching unravel strip), or -1/undefined for none.
+   * Original perimeter edge index to highlight (lit when the user hovers the
+   * matching unravel strip or footprint edge), or -1/undefined for none.
    */
   highlightEdge?: number;
+  /**
+   * How to render {@link Render3dOptions.highlightEdge}:
+   *  - `false`/undefined (default) — fill the matching wall PANEL in the highlight
+   *    token (the unravel-strip hover behaviour).
+   *  - `true` — leave walls normal and instead overlay the matching footprint EDGE
+   *    as a highlighted LINE along the base of that edge's wall(s) (perimeter/edit-
+   *    mode hover). Drawn last so it sits on top of the massing.
+   */
+  highlightAsLine?: boolean;
+  /**
+   * Optional SOLAR STUDY overlay: when present, a 3D sun-path dome is drawn AROUND
+   * the massing in the same camera/projection — a horizon compass rose (N/E/S/W),
+   * the summer / equinox / winter reference sun-path arcs plus the currently-selected
+   * day's arc, integer-hour tick marks, and the sun for the set day + solar time.
+   * All values come from REAL solar geometry (see core/solar.ts) driven by the
+   * settings' latitude, day of year, hour, and the sketch's `northOffset`. The dome
+   * is centred on the footprint and sized to frame the building. Used by the Solar
+   * Study popup only; thumbnails omit it (so their rendering is unchanged).
+   */
+  sunPath?: { settings: SolarSettings };
 }
 
 /**
@@ -356,6 +458,29 @@ export function render3d(
     highlightStroke: cssVar(canvas, "--m3d-highlight-stroke", "#d23154"),
     edgeW: cssNum(canvas, "--m3d-edge-width", 1),
     highlightW: cssNum(canvas, "--m3d-highlight-width", 2),
+    // ATMOSPHERIC FOG (depth cue): the colour distant faces fade toward and how far
+    // they fade at the very back. Fog colour defaults to the canvas background so
+    // far geometry dissolves into it (the atmospheric-perspective look).
+    fogColor: cssVar(canvas, "--m3d-fog-color", "#ffffff"),
+    fogStrength: cssNum(canvas, "--m3d-fog-strength", 0.35),
+    // SUN-PATH overlay tokens (only used when options.sunPath is set).
+    sunGround: cssVar(canvas, "--solar-ground-ring", "#b9c2cc"),
+    sunGroundW: cssNum(canvas, "--solar-ground-width", 1),
+    sunCardinalLine: cssVar(canvas, "--solar-cardinal-line", "#cdd5dd"),
+    sunCardinalText: cssVar(canvas, "--solar-cardinal-text", "#5b6672"),
+    sunArc: cssVar(canvas, "--solar-arc", "#c9b683"),
+    sunArcW: cssNum(canvas, "--solar-arc-width", 1),
+    sunArcActive: cssVar(canvas, "--solar-arc-active", "#e0a619"),
+    sunArcActiveW: cssNum(canvas, "--solar-arc-active-width", 2),
+    sunHourTick: cssVar(canvas, "--solar-hour-tick", "#b0894a"),
+    sunHourTickR: cssNum(canvas, "--solar-hour-tick-radius", 1.6),
+    sunFill: cssVar(canvas, "--solar-sun-fill", "#ffcf33"),
+    sunStroke: cssVar(canvas, "--solar-sun-stroke", "#e0a619"),
+    sunDiskR: cssNum(canvas, "--solar-sun-radius", 6),
+    sunRay: cssVar(canvas, "--solar-sun-ray", "rgba(224,166,25,0.55)"),
+    sunRayW: cssNum(canvas, "--solar-sun-ray-width", 1.5),
+    sunLabelGap: cssNum(canvas, "--solar-label-gap", 8),
+    sunLabelFont: cssVar(canvas, "--label-font", "12px ui-monospace, monospace"),
   };
 
   // Reset transform and clear in device pixels (same contract as render()).
@@ -368,6 +493,7 @@ export function render3d(
   const heights = options.heights;
   const cam = options.camera ?? DEFAULT_CAMERA;
   const highlightEdge = options.highlightEdge ?? -1;
+  const highlightAsLine = options.highlightAsLine ?? false;
 
   // Resolve each wall's height from its source edge: per-edge override first, then
   // the uniform default. (buildMassing guards non-finite/≤0 values.)
@@ -382,7 +508,23 @@ export function render3d(
   const allPts: Projected[] = [];
   for (const pf of projectedFaces) allPts.push(...pf.proj);
 
+  // SUN-PATH overlay geometry (model space). Built around the footprint centre and
+  // folded into the fit BELOW so the whole dome — not just the building — frames in
+  // the canvas (the diagram is meant to dominate, with the massing inside it).
+  let sunGeom: SunPathGeometry | null = null;
+  if (options.sunPath) {
+    sunGeom = buildSunGeometryForMassing(massing, options.sunPath.settings);
+    for (const v of sunFitPoints(sunGeom)) allPts.push(project(v, cam));
+  }
+
   const fit = fitProjected(allPts, width, height, options.marginPx);
+
+  // Project a model point straight to canvas pixels (used by the sun-path overlay).
+  const pc = (v: V3): { x: number; y: number } => toCanvas(project(v, cam), fit);
+
+  // GROUND-level sun-path elements (horizon ring + cardinal spokes) are drawn FIRST,
+  // so the massing paints on top and reads as standing on the compass rose.
+  if (sunGeom) drawSunGround(ctx, sunGeom, pc, tk);
 
   // Painter's algorithm: draw FARTHEST faces first so nearer walls paint over
   // them (opaque fills => correct occlusion). `depth` increases INTO the screen,
@@ -395,13 +537,49 @@ export function render3d(
     }))
     .sort((a, b) => b.meanDepth - a.meanDepth);
 
+  // ATMOSPHERIC PERSPECTIVE (subtle depth fog). We blend each wall's fill/stroke
+  // toward the background-coloured fog by an amount proportional to how FAR that
+  // face is from the camera, so distant surfaces lose contrast and recede while the
+  // foreground stays crisp — the depth separation seen in massing studies.
+  //
+  // WHY depth-NORMALIZED (t over the model's own min/max mean depth) rather than an
+  // absolute distance: the camera/scale and the model size both vary per thumbnail,
+  // so a fixed distance scale would fog tiny models away entirely and barely touch
+  // large ones. Normalizing means the effect is always "front of THIS model = clear,
+  // back of THIS model = up to fogStrength faded", reading consistently at any size.
+  //
+  // WHY subtle (default strength 0.35, capped at the very back): this is a depth CUE,
+  // not a style filter — over-fogging would erase the geometry and hurt legibility at
+  // thumbnail scale, violating function-before-aesthetic.
+  const fogStrength = tk.fogStrength;
+  // Parse the three FIXED colours ONCE (not per face) so the loop stays cheap arithmetic.
+  const fogActive = fogStrength > 0;
+  const fillRGBA = fogActive ? parseColor(tk.wallFill) : null;
+  const strokeRGBA = fogActive ? parseColor(tk.wallStroke) : null;
+  const fogRGBA = fogActive ? parseColor(tk.fogColor) : null;
+  let minDepth = Infinity;
+  let maxDepth = -Infinity;
   for (const pf of ordered) {
-    const isHighlight = highlightEdge >= 0 && pf.face.edge === highlightEdge;
+    if (pf.meanDepth < minDepth) minDepth = pf.meanDepth;
+    if (pf.meanDepth > maxDepth) maxDepth = pf.meanDepth;
+  }
+  const depthSpan = maxDepth - minDepth;
+  // Guard the degenerate case (single face / perfectly flat in depth): no range means
+  // no meaningful front/back, so fog factor is 0 (treated below via depthSpan check).
+  const canFog = fogActive && depthSpan > 0;
+
+  for (const pf of ordered) {
+    // In LINE mode the highlighted edge is drawn as an overlaid base line below, so
+    // its wall keeps the normal fill here; only PANEL mode lights the wall face.
+    const isHighlight = !highlightAsLine && highlightEdge >= 0 && pf.face.edge === highlightEdge;
 
     let fillStyle: string;
     let strokeStyle: string;
     let lineWidth: number;
     if (isHighlight) {
+      // Highlighted faces are EXEMPT from fog: the hover-highlight must stay clearly
+      // readable as a link to the unravel strip/footprint edge, and fading it toward
+      // the background would defeat that signal. (It also draws atop nearer walls.)
       fillStyle = tk.highlightFill;
       strokeStyle = tk.highlightStroke;
       lineWidth = tk.highlightW;
@@ -409,6 +587,16 @@ export function render3d(
       fillStyle = tk.wallFill;
       strokeStyle = tk.wallStroke;
       lineWidth = tk.edgeW;
+      if (canFog && fillRGBA && strokeRGBA && fogRGBA) {
+        // Normalized depth: 0 = nearest face, 1 = farthest. mix scales it by strength
+        // so only the very back reaches the full (still subtle) blend.
+        const t = (pf.meanDepth - minDepth) / depthSpan;
+        const mix = t * fogStrength;
+        fillStyle = mixColor(fillRGBA, fogRGBA, mix);
+        // Blend the STROKE a touch LESS (0.85×) than the fill so face edges keep some
+        // definition at the back and the massing's silhouette/wireframe stays legible.
+        strokeStyle = mixColor(strokeRGBA, fogRGBA, mix * 0.85);
+      }
     }
 
     ctx.beginPath();
@@ -425,4 +613,214 @@ export function render3d(
     ctx.lineJoin = "round";
     ctx.stroke();
   }
+
+  // SKY-level sun-path elements (the season + active arcs, hour ticks/labels, the
+  // cardinal letters, and the current sun) are drawn AFTER the massing as a legible
+  // diagram overlay on top — the standard way architectural sun studies read.
+  if (sunGeom) drawSunSky(ctx, sunGeom, pc, tk);
+
+  // LINE-mode highlight: overlay the hovered footprint EDGE as a highlighted line
+  // tracing the BASE (z = 0) of that edge's wall(s). A curved edge spans several
+  // flattened sub-quads, so we stroke every base segment whose face carries the
+  // edge index — giving the full edge (curve included). Drawn LAST so it reads on
+  // top of the massing rather than being occluded by nearer walls.
+  if (highlightAsLine && highlightEdge >= 0) {
+    ctx.beginPath();
+    for (const pf of ordered) {
+      if (pf.face.edge !== highlightEdge) continue;
+      // Quad point order is base-a, base-b, top-b, top-a — so [0] and [1] are the
+      // two base (footprint) corners of this sub-quad.
+      const a = toCanvas(pf.proj[0], fit);
+      const b = toCanvas(pf.proj[1], fit);
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.strokeStyle = tk.highlightStroke;
+    // A touch heavier than the panel highlight so the single line reads clearly.
+    ctx.lineWidth = tk.highlightW + 1;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SUN-PATH OVERLAY (Solar Study only) — build + draw the 3D sun dome.
+//
+// The geometry is REAL solar math (core/solar.ts); here we only size the dome to
+// the massing, fold its extent into the fit, and paint it in the SAME camera so it
+// rotates with the building. Colours come from CSS tokens (resolved into `tk`).
+// ---------------------------------------------------------------------------
+
+/** The subset of resolved render tokens the sun-path overlay draws with. */
+type SunTokens = {
+  sunGround: string;
+  sunGroundW: number;
+  sunCardinalLine: string;
+  sunCardinalText: string;
+  sunArc: string;
+  sunArcW: number;
+  sunArcActive: string;
+  sunArcActiveW: number;
+  sunHourTick: string;
+  sunHourTickR: number;
+  sunFill: string;
+  sunStroke: string;
+  sunDiskR: number;
+  sunRay: string;
+  sunRayW: number;
+  sunLabelGap: number;
+  sunLabelFont: string;
+};
+
+/**
+ * Size + centre the sun dome to the massing: centred on the footprint, with a radius
+ * that comfortably encloses both the footprint half-diagonal and the building height
+ * so every sun-path arc clears the roof.
+ */
+function buildSunGeometryForMassing(m: Massing, settings: SolarSettings): SunPathGeometry {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let maxZ = 0;
+  for (const f of m.faces) {
+    for (const p of f.pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    minX = maxX = minY = maxY = 0;
+  }
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const halfDiag = 0.5 * Math.hypot(maxX - minX, maxY - minY);
+  // 1.6× the footprint half-diagonal frames the building inside the dome; the height
+  // terms keep the dome above a tall/narrow massing. Floored to 1 so it's never zero.
+  const radius = Math.max(halfDiag * 1.6, maxZ * 1.5, 1);
+  return buildSunPathGeometry({ x: cx, y: cy, z: 0 }, radius, settings);
+}
+
+/** Model points whose projected extent should be included in the canvas fit. */
+function sunFitPoints(g: SunPathGeometry): V3[] {
+  const pts: V3[] = [...g.groundRing];
+  for (const arc of g.arcs) pts.push(...arc.points);
+  if (g.sun.visible) pts.push(g.sun.point);
+  // Cardinal letters sit just outside the ring; include their spots so they don't clip.
+  for (const c of g.cardinals) {
+    pts.push({ x: g.center.x + c.dir.x * g.radius * 1.12, y: g.center.y + c.dir.y * g.radius * 1.12, z: g.center.z });
+  }
+  return pts;
+}
+
+/** Draw the ground-level dome elements (horizon ring + cardinal spokes). */
+function drawSunGround(
+  ctx: CanvasRenderingContext2D,
+  g: SunPathGeometry,
+  pc: (v: V3) => { x: number; y: number },
+  tk: SunTokens,
+): void {
+  ctx.setLineDash([]);
+  // Horizon ring.
+  ctx.beginPath();
+  g.groundRing.forEach((v, i) => {
+    const c = pc(v);
+    if (i === 0) ctx.moveTo(c.x, c.y);
+    else ctx.lineTo(c.x, c.y);
+  });
+  ctx.strokeStyle = tk.sunGround;
+  ctx.lineWidth = tk.sunGroundW;
+  ctx.stroke();
+  // Cardinal spokes from centre to ring.
+  const centre = pc(g.center);
+  for (const card of g.cardinals) {
+    const tip = pc({ x: g.center.x + card.dir.x * g.radius, y: g.center.y + card.dir.y * g.radius, z: g.center.z });
+    ctx.beginPath();
+    ctx.moveTo(centre.x, centre.y);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.strokeStyle = tk.sunCardinalLine;
+    ctx.lineWidth = tk.sunGroundW;
+    ctx.stroke();
+  }
+}
+
+/** Draw the sky-level dome elements (arcs, hour marks/labels, cardinal letters, sun). */
+function drawSunSky(
+  ctx: CanvasRenderingContext2D,
+  g: SunPathGeometry,
+  pc: (v: V3) => { x: number; y: number },
+  tk: SunTokens,
+): void {
+  ctx.setLineDash([]);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  // Season + active sun-path arcs. The selected day's arc ("active") is brighter and
+  // heavier so it stands out from the three faint season guides.
+  for (const arc of g.arcs) {
+    if (arc.points.length < 2) continue;
+    const active = arc.key === "active";
+    ctx.beginPath();
+    arc.points.forEach((v, i) => {
+      const c = pc(v);
+      if (i === 0) ctx.moveTo(c.x, c.y);
+      else ctx.lineTo(c.x, c.y);
+    });
+    ctx.strokeStyle = active ? tk.sunArcActive : tk.sunArc;
+    ctx.lineWidth = active ? tk.sunArcActiveW : tk.sunArcW;
+    ctx.stroke();
+  }
+
+  // Integer-hour dots.
+  ctx.fillStyle = tk.sunHourTick;
+  for (const m of g.hourMarks) {
+    const c = pc(m.point);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, tk.sunHourTickR, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // Sparse hour labels + cardinal letters share the label font.
+  ctx.font = tk.sunLabelFont;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = tk.sunCardinalText;
+  for (const m of g.hourMarks) {
+    if (!m.label) continue;
+    const c = pc(m.point);
+    ctx.fillText(String(m.hour), c.x, c.y - tk.sunLabelGap);
+  }
+  for (const card of g.cardinals) {
+    const c = pc({ x: g.center.x + card.dir.x * g.radius * 1.12, y: g.center.y + card.dir.y * g.radius * 1.12, z: g.center.z });
+    ctx.fillText(card.label, c.x, c.y);
+  }
+
+  // The current sun: a faint ray from the dome centre to the sun, then the sun disk.
+  if (g.sun.visible) {
+    const centre = pc(g.center);
+    const sun = pc(g.sun.point);
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(centre.x, centre.y);
+    ctx.lineTo(sun.x, sun.y);
+    ctx.strokeStyle = tk.sunRay;
+    ctx.lineWidth = tk.sunRayW;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(sun.x, sun.y, tk.sunDiskR, 0, 2 * Math.PI);
+    ctx.fillStyle = tk.sunFill;
+    ctx.fill();
+    ctx.strokeStyle = tk.sunStroke;
+    ctx.lineWidth = tk.sunRayW;
+    ctx.stroke();
+  }
+
+  // Restore canvas text defaults so later drawing isn't affected.
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
 }

@@ -69,8 +69,13 @@ export function pan(vp: Viewport, dxScreen: number, dyScreen: number): Viewport 
   return { ...vp, originX: vp.originX + dxScreen, originY: vp.originY + dyScreen };
 }
 
+// Interactive zoom limits. Min 0.25 px/ft lets the user zoom out to frame very
+// large footprints (a ~4000 ft extent fits in ~1000 px); max 2000 px/ft caps
+// zoom-in. These bound the MAIN canvas's pan/zoom and the default fit.
+const MIN_SCALE = 0.25;
+const MAX_SCALE = 2000;
 function clampScale(s: number): number {
-  return Math.max(2, Math.min(2000, s));
+  return Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));
 }
 
 /** Cubic ease-in-out (slow start, slow stop) for smooth viewport animations. */
@@ -79,32 +84,71 @@ export function easeInOut(t: number): number {
 }
 
 /**
- * Interpolate between two viewports for an animated zoom, at parameter `t` in
- * [0,1], keeping a model ANCHOR point's motion natural:
- *   - scale moves GEOMETRICALLY (log-space), which reads as a constant-rate
- *     zoom rather than the rushed-then-crawl of a linear scale lerp;
- *   - the anchor's ON-SCREEN position eases linearly from where it starts to
- *     where the target places it, so the focal point doesn't drift/swim.
- * Pass `t` already eased (e.g. via easeInOut) for slow-in/slow-out.
+ * Cubic ease-OUT (fast start, gentle settle). Used for the viewport zoom/pan tween:
+ * a double-click / nav-button zoom is a DIRECT action, so the view should start
+ * moving immediately and decelerate into place — ease-in-out's slow first half
+ * reads as lag ("I clicked and nothing happened, then it lurched"). This is the
+ * standard "decelerate" motion for entering/settling UI.
  */
-export function lerpViewportFocal(
+export function easeOut(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+/**
+ * Normalize an angle delta `to - from` into [-π, π] so an animated rotation takes
+ * the SHORTEST path rather than spinning the long way. Shared by the 3D massing
+ * camera tweens (mini-window thumbnail + Solar Study popup).
+ */
+export function shortestAngleDelta(from: number, to: number): number {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+/**
+ * Interpolate between two viewports for a clean zoom/pan animation, at parameter
+ * `t` in [0,1]. The motion is anchored to the VIEWPORT CENTRE:
+ *   - the screen-centre's MODEL point moves LINEARLY from the `from` centre to the
+ *     `to` centre — so the focal point of the motion is always dead-centre and the
+ *     view glides straight toward its destination;
+ *   - the scale moves GEOMETRICALLY (log-space), which reads as a constant-rate
+ *     zoom rather than the rushed-then-crawl of a linear scale lerp.
+ *
+ * Centring the motion is what keeps the zoom feeling clean: no single off-centre
+ * anchor can swing across (or fly in from off) the screen mid-animation, which is
+ * the artefact a fixed-anchor interpolation produces when `from` and `to` frame
+ * different regions (e.g. double-clicking an off-centre panel/cell to zoom in).
+ *
+ * `w`,`h` are the canvas CSS pixel size (needed to locate each viewport's centre).
+ * Pass `t` already eased (e.g. via easeInOut) for slow-in/slow-out. Endpoints are
+ * exact: t=0 returns `from`, t=1 returns `to`.
+ */
+export function lerpViewport(
   from: Viewport,
   to: Viewport,
-  anchor: Point,
   t: number,
+  w: number,
+  h: number,
 ): Viewport {
   const scale = from.scale * Math.pow(to.scale / from.scale, t);
-  const s0 = toScreen(from, anchor);
-  const s1 = toScreen(to, anchor);
-  const sx = s0.x + (s1.x - s0.x) * t;
-  const sy = s0.y + (s1.y - s0.y) * t;
-  // Solve origin so toScreen(vp, anchor) === (sx, sy) at this scale.
-  return { scale, originX: sx - anchor.x * scale, originY: sy + anchor.y * scale };
+  const cFrom = toModel(from, w / 2, h / 2);
+  const cTo = toModel(to, w / 2, h / 2);
+  const cx = cFrom.x + (cTo.x - cFrom.x) * t;
+  const cy = cFrom.y + (cTo.y - cFrom.y) * t;
+  // Solve the origin so model (cx,cy) sits at the screen centre at this scale
+  // (toScreen: w/2 = originX + cx·scale; h/2 = originY − cy·scale).
+  return { scale, originX: w / 2 - cx * scale, originY: h / 2 + cy * scale };
 }
 
 /**
  * Compute a viewport that FITS a perimeter's bounds into a `width`×`height`
  * canvas, leaving `marginPx` of padding on every side, and centres it.
+ *
+ * `minScale` is the lowest px/unit the fit may zoom OUT to; it defaults to the
+ * interactive MIN_SCALE (0.25) so the main canvas's fits behave as before. The
+ * OverviewMap passes a far smaller floor so a large model extent (e.g. a wide
+ * many-panel unravel strip) shrinks enough to frame fully in its small box.
  *
  * Used by the mini-window thumbnails: each saved perimeter gets its own
  * fit-to-bounds viewport so the whole shape is visible regardless of its model
@@ -124,6 +168,7 @@ export function fitViewport(
   width: number,
   height: number,
   marginPx: number,
+  minScale: number = MIN_SCALE,
 ): Viewport {
   const pts = flattenPerimeter(p);
   if (pts.length === 0) {
@@ -151,8 +196,12 @@ export function fitViewport(
   const availW = Math.max(width - marginPx * 2, 1);
   const availH = Math.max(height - marginPx * 2, 1);
 
-  // Fit: choose the scale that lets BOTH spans fit, then clamp.
-  const scale = clampScale(Math.min(availW / spanX, availH / spanY));
+  // Fit: choose the scale that lets BOTH spans fit, then clamp. `minScale`
+  // defaults to the interactive MIN_SCALE (so the MAIN canvas's fits are
+  // unchanged); callers framing a LARGE extent into a TINY box (the OverviewMap)
+  // pass a lower floor so a wide many-panel strip / huge footprint can shrink
+  // enough to frame in full instead of overflowing the box at the 0.25 floor.
+  const scale = Math.max(minScale, Math.min(MAX_SCALE, Math.min(availW / spanX, availH / spanY)));
 
   // Centre the bounds' midpoint in the canvas. Model +Y is up, so the screen
   // origin Y must account for the flip via toScreen's subtraction.

@@ -64,8 +64,6 @@
 
   /* === COLOR · CANVAS DRAWING TOKENS (read by core/renderer.ts) === */
   --canvas-bg: #ffffff;             /* Canvas background fill */
-  --grid-minor: #e3e8ed;            /* Minor grid lines (subtle) */
-  --grid-major: #c3ccd5;            /* Major grid lines (every 5th — clearly darker) */
   --segment-color: #1f6feb;         /* Committed open polyline segments */
   --segment-closed-color: #1f9d6b;  /* Segments once perimeter is closed */
   --rubberband-color: #c2700a;      /* Live cursor-following segment */
@@ -80,9 +78,43 @@
   --unravel-line-color: #1f6feb;    /* Unravelled straight edge (rectangle outline) */
   --unravel-curve-color: #c2700a;   /* Unravelled curved edge (dashed rectangle outline) */
   --unravel-rect-fill: rgba(31,111,235,0.10); /* Unravelled edge rectangle fill (space/panel) */
-  --unravel-cell-color: #8492a0;    /* Cell-split division lines inside a panel */
+  --unravel-cell-color: #8492a0;    /* Cell-split + Subtractive division lines inside a panel */
+  --unravel-divide-preview-color: rgba(31,111,235,0.45); /* Subtractive division-line placement preview (ghost) */
+  --unravel-erase-highlight-color: #d23154; /* Eraser tool: division line targeted for deletion (click removes it) */
+  --unravel-erase-highlight-width: 3;        /* Stroke width (px) of the Eraser deletion highlight line */
   --unravel-highlight-fill: rgba(210,49,84,0.18); /* Hovered unravel rectangle fill */
   --unravel-highlight-color: #d23154; /* Hovered unravel rect outline + linked shape edge (mini-window) */
+  --unravel-cell-highlight-fill: rgba(31,111,235,0.18); /* Hovered individual CELL fill (Panels phase) — accent blue so it reads as selectable, distinct from the warm whole-panel hover */
+  --unravel-edge-select: #e5484d; /* Assembly phase: the focused cell's top/right/bottom/left EDGE under the cursor, stroked red to mark it as selected (one edge at a time) */
+  --unravel-mullion-color: #4f8aa0; /* Mullions tool (Stick system): the paired mullion-face lines drawn to either side (±offset) of each grid line */
+
+  /* === MATERIAL-ID CELL VIEW ===
+     The "View" button's Material-ID mode tints every grid CELL by its geometric
+     SHAPE (a Lumion-style Material ID overlay). The HUE per shape is generated
+     procedurally (golden-angle spread) in the renderer; these tokens control the
+     constant SATURATION / LIGHTNESS / FILL ALPHA of every such tint so the whole
+     palette's intensity is editable from here without touching code. Saturation and
+     lightness are plain percentage NUMBERS (no % sign); alpha is 0–1. */
+  --cellview-saturation: 65;   /* HSL saturation (%) for every cell tint */
+  --cellview-lightness: 58;    /* HSL lightness (%) for every cell tint */
+  --cellview-fill-alpha: 0.62; /* Fill opacity so underlying grid lines/borders read through */
+
+  /* === ORIENTATION HEATMAP CELL VIEW ===
+     The "View" button's Orientation mode colours each cell by the compass direction
+     its glass faces (real per-face normals + the Solar Study north offset) and labels
+     it with the 8-point cardinal. The cell's heat scalar (0 = north-facing/cool →
+     1 = west-facing/warm) samples a Grasshopper-style multi-stop gradient: the four
+     STOPS below are evenly spaced across that range and blended in RGB. They must be
+     HEX colours. Cardinal landing points on this ramp: N → stop-0 (dark blue), E →
+     stop-1 (blue), S → stop-2 (yellow), W → stop-3 (orange); NE/SE/SW/NW fall on the
+     blends between. Alpha is 0–1; the dark label colour sits on the shared label
+     plate (--label-bg) for contrast. */
+  --orient-stop-0: #0a2a6b;    /* heat 0.00 — N (coolest): dark blue */
+  --orient-stop-1: #2f7ff0;    /* heat 0.33 — E: blue */
+  --orient-stop-2: #f5d11e;    /* heat 0.67 — S: yellow */
+  --orient-stop-3: #f5871f;    /* heat 1.00 — W (warmest): orange */
+  --orient-fill-alpha: 0.78;   /* Fill opacity over the panel */
+  --orient-label-color: #11161c; /* Centred cardinal-direction label text */
 
   /* === FLOOR PLATES (horizontal level reference lines) ===
      Dotted horizontal lines placed via the "floor plate" tool. Shown in both the
@@ -126,7 +158,9 @@
   --segment-width: 1.5;             /* Segment stroke width (px) */
   --highlight-width: 3;             /* Hover-link highlight stroke width (px) — unravel strip + linked edge */
   --unravel-top-width: 4;           /* Emphasised top edge of a hovered unravel rectangle (resize affordance) */
-  --grid-width: 1;                  /* Grid line width (px) */
+  --unravel-dim-tick: 4;            /* Half-length (px) of end ticks on the Subtractive live spacing dimension */
+  --affordance-width: 1.5;          /* Thin affordance strokes (px): insert-preview ring + "＋", first-vertex close ring */
+  --handle-line-width: 1;           /* Bézier handle leader line stroke width (px) */
   --floorplate-width: 1;            /* Floor-plate line stroke width (px) */
   --floorplate-dash: 6;             /* Floor-plate dash length (px) */
   --floorplate-dash-gap: 5;         /* Floor-plate gap between dashes (px) */
@@ -137,8 +171,8 @@
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
   --font-size-base: 13px;           /* Base UI text size */
   --font-size-small: 11px;          /* Hints / help text */
-  --font-size-title: 15px;          /* Panel title */
   --font-size-section: 11px;        /* Section headers */
+  --font-size-lg: 15px;             /* Icon-only glyphs (e.g. Undo/Redo arrows) */
 
   /* === SPACING === */
   --space-1: 4px;
@@ -153,6 +187,19 @@
   --control-height: 28px;           /* Inputs / buttons height */
   --radius: 4px;                    /* Corner radius for controls */
   --radius-sm: 3px;
+
+  /* === NAVIGATION HEADER ===
+     Full-width workflow-phase bar above the panel + canvas. Four phase buttons:
+     Perimeter → Elevations → Panels → Assembly. Highlights the active phase in
+     the primary accent colour. */
+  --nav-header-height: 38px;            /* Header strip height */
+  --nav-header-bg: var(--color-panel-bg);      /* Header background */
+  --nav-header-border: var(--color-panel-border); /* Bottom border */
+  --nav-btn-color: var(--color-text-dim);      /* Inactive button text */
+  --nav-btn-color-active: var(--color-text-on-accent); /* Active button text */
+  --nav-btn-bg-active: var(--color-accent);    /* Active button fill */
+  --nav-btn-bg-hover: var(--control-bg-hover); /* Hover background */
+  --nav-btn-color-disabled: var(--color-text-faint); /* Disabled/unreachable phase text */
 
   /* === MINI-WINDOW (saved perimeters) ===
      Floating, draggable gallery overlaid on the top-right of the canvas. */
@@ -171,6 +218,46 @@
   --mini-offset: 12px;                    /* Inset from the top-right corner */
   --mini-max-height: 60%;                 /* Cap height; body scrolls past this */
   --mini-thumb-height: 130px;             /* Thumbnail canvas height (~1.55×) */
+  --mini-plan-outline: rgba(31, 111, 235, 0.55); /* Inset outline marking a thumb that's in top-down/plan view */
+
+  /* === SOLAR STUDY (larger massing popup) ===
+     Draggable popup opened from a saved row's ☀ button. Surfaces/border/shadow
+     reuse the --mini-* family so light + dark themes work with no extra overrides;
+     only its own size tokens live here. */
+  --solar-width: 760px;                   /* Popup width (≥2× the old 380px) */
+  --solar-canvas-height: 600px;           /* Larger massing canvas height (2× the old 300px) */
+
+  /* --- Sun-path DOME (read by core/extrude3d.ts when drawing the Solar Study) ---
+     The 3D sun study drawn around the massing: horizon compass rose, the summer /
+     equinox / winter reference arcs, the selected day's arc (the "active" one,
+     brighter), hour-of-day ticks, and the live sun. Sizes are unitless px (parsed
+     by the renderer). */
+  --solar-ground-ring: #c2cad3;           /* Horizon ring of the dome */
+  --solar-ground-width: 1;                /* Horizon ring + cardinal spoke width (px) */
+  --solar-cardinal-line: #d4dbe2;         /* N/E/S/W spoke lines from the dome centre */
+  --solar-cardinal-text: #5b6672;         /* N/E/S/W letters + hour-number labels */
+  --solar-arc: #cdba86;                   /* Season reference sun-path arcs (faint guides) */
+  --solar-arc-width: 1;                   /* Season arc stroke width (px) */
+  --solar-arc-active: #e0a619;            /* Selected day's sun-path arc (emphasised) */
+  --solar-arc-active-width: 2;            /* Selected day's arc stroke width (px) */
+  --solar-hour-tick: #b0894a;             /* Integer-hour dots along the arcs */
+  --solar-hour-tick-radius: 1.8;          /* Hour-dot radius (px) */
+  --solar-sun-fill: #ffce33;              /* Current-sun disk fill */
+  --solar-sun-stroke: #e0a619;            /* Current-sun disk outline */
+  --solar-sun-radius: 7;                  /* Current-sun disk radius (px) */
+  --solar-sun-ray: rgba(224, 166, 25, 0.55); /* Faint ray from dome centre to the sun */
+  --solar-sun-ray-width: 1.5;             /* Sun ray / disk outline width (px) */
+  --solar-label-gap: 9;                   /* Gap (px) between an hour dot and its number */
+
+  /* --- Solar Study CONTROLS (orientation dial, sliders, fields) --- */
+  --solar-compass-size: 76px;             /* Compass dial diameter */
+  --solar-compass-bg: var(--mini-thumb-bg);   /* Dial face background */
+  --solar-compass-ring: var(--mini-border);   /* Dial outer ring */
+  --solar-compass-tick: var(--color-text-dim); /* Dial N/E/S/W letters */
+  --solar-needle-color: var(--color-accent-warm); /* Orientation needle (drawing's +Y) */
+  --solar-control-label: var(--color-text-dim);  /* Control captions (Date, Solar time…) */
+  --solar-readout: var(--color-text);     /* Live value readouts (date, time, sun) */
+  --solar-accent: var(--color-accent);    /* Slider/field focus accent */
 
   /* === MINI-WINDOW 3D (read by core/extrude3d.ts) ===
      Colours/sizes for the extruded 3D massing drawn in each thumbnail: the
@@ -182,6 +269,82 @@
   --m3d-highlight-stroke: #d23154;        /* Highlighted wall panel stroke (hover-link) */
   --m3d-edge-width: 1;                    /* Face edge stroke width (px) */
   --m3d-highlight-width: 2;               /* Highlighted wall stroke width (px) */
+  /* Atmospheric-perspective FOG (depth cue): faces farthest from the camera blend
+     toward this colour so the background recedes and the foreground reads crisp.
+     Defaults to the thumbnail background so distant geometry dissolves into it. */
+  --m3d-fog-color: #ffffff;               /* Colour distant geometry fades toward (== --mini-thumb-bg) */
+  --m3d-fog-strength: 0.5;                /* Max blend fraction at farthest depth (0 disables) — unitless */
+
+  /* === OVERVIEW MAP ===
+     Small, draggable NAVIGATOR overlay anchored bottom-left of the canvas, ABOVE
+     the Floor plate / Subtractive / Additive cluster (.tool-controls). It shows a
+     fit-to-view, centred picture of the WHOLE perimeter plus a rectangle marking
+     the main canvas's current view. Surfaces/border/shadow reuse the --mini-*
+     token family so light + dark themes both work with no overview-specific dark
+     overrides. */
+  --overview-width: 200px;                /* Overlay width */
+  --overview-canvas-height: 150px;        /* Fit-to-view canvas height */
+  --overview-bg: var(--mini-bg);          /* Window body background */
+  --overview-border: var(--mini-border);  /* Window + canvas border */
+  --overview-titlebar-bg: var(--mini-titlebar-bg); /* Drag-handle strip background */
+  --overview-grip-color: var(--mini-title-text);   /* Drag-handle grip bar (no text label) */
+  --overview-grip-height: 13px;                    /* Drag-handle strip height (slim) */
+  --overview-grip-width: 22px;                     /* Centered grip bar width */
+  --overview-grip-thickness: 3px;                  /* Centered grip bar thickness */
+  --overview-canvas-bg: var(--mini-thumb-bg);      /* Canvas background (matches the main canvas) */
+  --overview-shadow: var(--mini-shadow);  /* Window drop shadow */
+  --overview-padding: 8;                  /* Fit padding inside the canvas (px, unitless — read by OverviewMap) */
+  --overview-indicator-color: var(--color-accent-warm); /* Current-view rectangle stroke */
+  --overview-indicator-width: 1.5;        /* Current-view rectangle stroke width (px) */
+  /* Default anchor: bottom-left, lifted to clear the .tool-controls button row
+     (its --control-height plus a small gap) so the overview never collides with
+     the Floor plate / Subtractive / Additive buttons at rest. */
+  --overview-offset-left: var(--space-3);
+  --overview-offset-bottom: calc(var(--space-3) + var(--control-height) + var(--space-2));
+
+  /* === HELP BUTTON ===
+     Circular "?" button floating at the canvas BOTTOM-RIGHT (anchored in
+     .canvas-wrap like the floor-plate / history clusters). Sizing/colour are
+     tokens here; the button reuses the control colour family so it reads as a
+     sibling of the other floating canvas controls. */
+  --help-btn-size: 32px;                  /* Button diameter (round) */
+  --help-btn-offset: var(--space-3);      /* Inset from the bottom-right corner */
+  --help-btn-font-size: 16px;             /* "?" glyph size */
+
+  /* === CONTROLS / HELP POPUP ===
+     Floating panel opened by the "?" button, listing all controls/keybindings.
+     Sits just above the help button (bottom-right). Surfaces/borders/shadow reuse
+     the mini-window token family so it matches the other floating overlays. */
+  --help-popup-width: 320px;              /* Popup width */
+  --help-popup-gap: var(--space-2);       /* Gap between the popup and the "?" button */
+  --help-popup-clearance: var(--space-3); /* Minimum clear gap kept between the popup's TOP and the minimap's BOTTOM edge */
+  /* Cap height so the popup's TOP stays BELOW the minimap (both share the canvas
+     right column — the popup is anchored bottom-right and grows upward, the
+     minimap is anchored top-right). Available height = full canvas height, minus
+     the minimap's reserved band at the top (its --mini-offset inset + --mini-max-height),
+     minus the popup's own bottom anchor (button offset + button size + gap),
+     minus a clearance gap. Derived from the --mini-* and --help-* tokens so the
+     two overlays stay consistent if either is retuned. Body scrolls past this cap. */
+  --help-popup-max-height: calc(
+    100% - var(--mini-offset) - var(--mini-max-height)
+    - var(--help-btn-offset) - var(--help-btn-size) - var(--help-popup-gap)
+    - var(--help-popup-clearance)
+  );
+
+  /* === STATISTICS DROPDOWN ===
+     Panel that drops DOWN from the "Statistics" button (top of canvas, next to
+     Redo) and shows the live stats for the current view. The user wants it to
+     obstruct the viewport as little as possible, so the BACKGROUND is transparent
+     (tune --stats-dropdown-bg to add a surface if ever needed) while the TEXT keeps
+     a subtle shadow for legibility against the canvas. */
+  --stats-dropdown-bg: transparent;       /* Dropdown surface — TRANSPARENT so it barely covers the viewport */
+  --stats-dropdown-width: 200px;          /* Dropdown width */
+  --stats-dropdown-gap: var(--space-1);   /* Gap between the button and the dropdown */
+  --stats-dropdown-pad: var(--space-2);   /* Inner padding around the stat rows */
+  --stats-dropdown-row-gap: 2px;          /* Vertical gap between stat rows */
+  /* Subtle text shadow so the (un-surfaced) readouts stay readable over busy canvas
+     content without an opaque background. */
+  --stats-dropdown-text-shadow: 0 1px 2px var(--color-app-bg);
 }
 
 /* ==========================================================================
@@ -221,8 +384,6 @@
 
   /* === COLOR · CANVAS DRAWING TOKENS === */
   --canvas-bg: #1a1d21;
-  --grid-minor: #262b31;
-  --grid-major: #353d46;
   --segment-color: #7fb2ff;
   --segment-closed-color: #5cd6a0;
   --rubberband-color: #ffb454;
@@ -238,8 +399,19 @@
   --unravel-curve-color: #ffb454;
   --unravel-rect-fill: rgba(127,178,255,0.12);
   --unravel-cell-color: #93a1b0;
+  --unravel-divide-preview-color: rgba(127,178,255,0.55);
+  --unravel-erase-highlight-color: #ff5c7c; /* Eraser deletion highlight — dark */
+  /* --unravel-erase-highlight-width is unitless and theme-independent (set in :root). */
   --unravel-highlight-fill: rgba(255,92,124,0.22);
   --unravel-highlight-color: #ff5c7c;
+  --unravel-cell-highlight-fill: rgba(127,178,255,0.24); /* Hovered individual CELL fill (Panels phase) — accent blue */
+  --unravel-edge-select: #ff6166; /* Assembly phase: hovered focused-cell edge — brighter red for dark mode */
+  --unravel-mullion-color: #6fb0c6; /* Mullions tool: paired mullion-face lines — lifted for dark mode */
+  /* Material-ID cell view — slightly lower lightness so saturated hues sit well on the dark canvas. */
+  --cellview-lightness: 52;
+  --cellview-fill-alpha: 0.55;
+  /* Orientation heatmap — slightly lower fill alpha so the saturated stops sit well on the dark canvas. */
+  --orient-fill-alpha: 0.7;
   /* Height field text follows --label-text (set below), so no dark override needed here. */
   --label-text: #e6edf3;
   --label-bg: rgba(20, 24, 28, 0.85);
@@ -255,12 +427,24 @@
   --mini-item-active-border: #7fb2ff;
   --mini-stats-text: #93a1b0;
   --mini-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --mini-plan-outline: rgba(127, 178, 255, 0.6); /* Plan-view inset outline — dark */
 
   /* === MINI-WINDOW 3D — dark === */
   --m3d-wall-fill: #39424d;               /* Vertical wall panel fill */
   --m3d-wall-stroke: #5d6b78;             /* Wall panel edge stroke */
   --m3d-highlight-fill: rgba(255, 92, 124, 0.38); /* Highlighted wall panel fill (hover-link) */
   --m3d-highlight-stroke: #ff5c7c;        /* Highlighted wall panel stroke (hover-link) */
+  /* Fog fades toward the DARK canvas background; strength inherits the light value
+     (the same subtle ~35% blend reads well against the dark thumbnail too). */
+  --m3d-fog-color: #1a1d21;               /* Colour distant geometry fades toward (== --mini-thumb-bg, dark) */
+
+  /* === SOLAR STUDY sun-path DOME — dark ===
+     The gold arcs/sun read well on the dark canvas as-is; only the neutral ring +
+     labels need lifting off the dark background. */
+  --solar-ground-ring: #3f4954;           /* Horizon ring on the dark canvas */
+  --solar-cardinal-line: #4a5562;         /* Cardinal spokes on the dark canvas */
+  --solar-cardinal-text: #aab6c2;         /* N/E/S/W + hour labels (lightened for dark) */
+  --solar-arc: #8a7a4e;                   /* Season reference arcs (muted gold on dark) */
 }
 
 /* ==========================================================================
@@ -288,12 +472,95 @@ body {
 .app {
   display: grid;
   grid-template-columns: var(--panel-width) 1fr;
+  grid-template-rows: var(--nav-header-height) 1fr;
   height: 100%;
   width: 100%;
 }
 
+/* Collapsed left panel: drop its column to zero so the canvas reclaims the width.
+   The panel is hidden so its content can't overflow the 0-width column. The grid
+   children are placed EXPLICITLY (below) so hiding the panel never lets the stage
+   reflow into column 1 — it always stays in column 2 and gets the full width.
+   The nav-header spans both columns, so its toggle stays visible to expand again. */
+.app--panel-collapsed {
+  grid-template-columns: 0 1fr;
+}
+.app--panel-collapsed .panel {
+  display: none;
+}
+
+/* === NAVIGATION HEADER ===
+   Full-width workflow bar pinned to the top, spanning both the tool panel and
+   the canvas columns. Phase buttons light up blue at the current step. */
+.nav-header {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  gap: var(--space-1);
+  background: var(--nav-header-bg);
+  border-bottom: 1px solid var(--nav-header-border);
+  z-index: 10; /* stay above canvas overlays */
+}
+
+/* Collapse/expand toggle for the left tool panel, parked at the start of the header. */
+.nav-header__toggle {
+  height: calc(var(--nav-header-height) - 12px);
+  width: calc(var(--nav-header-height) - 12px);
+  margin-right: var(--space-2);
+  border: 1px solid var(--nav-header-border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--nav-btn-color);
+  font-size: var(--font-size-base);
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+  user-select: none;
+}
+.nav-header__toggle:hover {
+  background: var(--nav-btn-bg-hover);
+  color: var(--color-text);
+}
+
+.nav-header__btn {
+  height: calc(var(--nav-header-height) - 12px);
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--nav-btn-color);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.nav-header__btn:hover:not(:disabled):not(.is-active) {
+  background: var(--nav-btn-bg-hover);
+  color: var(--color-text);
+}
+
+.nav-header__btn.is-active {
+  background: var(--nav-btn-bg-active);
+  color: var(--nav-btn-color-active);
+  cursor: default;
+}
+
+.nav-header__btn:disabled {
+  color: var(--nav-btn-color-disabled);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* === LEFT TOOL PANEL === */
 .panel {
+  grid-column: 1;
+  grid-row: 2;
   background: var(--color-panel-bg);
   border-right: 1px solid var(--color-panel-border);
   padding: var(--space-3);
@@ -301,13 +568,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-}
-
-.panel__title {
-  font-size: var(--font-size-title);
-  font-weight: 600;
-  margin: 0;
-  letter-spacing: 0.02em;
 }
 
 .panel__section {
@@ -318,7 +578,6 @@ body {
   border-bottom: 1px solid var(--color-panel-border);
 }
 .panel__section:last-child { border-bottom: none; }
-.panel__section--help { margin-top: auto; }
 
 .panel__section-title {
   font-size: var(--font-size-section);
@@ -397,6 +656,14 @@ input[type="checkbox"] {
 }
 .btn--primary:hover { filter: brightness(1.06); background: var(--control-bg-active); }
 .btn--primary:disabled { filter: none; }
+/* Engaged/pressed state for a primary TOGGLE button (e.g. Unravel when ON).
+   Keeps the blue accent but reads as visibly "down": darker shade + inset ring
+   so an active toggle is distinguishable at a glance from its idle blue. */
+.btn--primary.is-active {
+  filter: brightness(0.82);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.btn--primary.is-active:hover { filter: brightness(0.86); }
 
 /* === CONTROLS · SEGMENTED TOGGLE === */
 .segmented {
@@ -445,6 +712,8 @@ input[type="checkbox"] {
 
 /* === RIGHT STAGE (canvas + status bar) === */
 .stage {
+  grid-column: 2;
+  grid-row: 2;
   display: grid;
   grid-template-rows: 1fr var(--statusbar-height);
   height: 100%;
@@ -467,14 +736,118 @@ input[type="checkbox"] {
    hovered (or being dragged) so the cursor matches the drag-to-stretch action. */
 .canvas--ns-resize { cursor: ns-resize; }
 
-/* === FLOOR PLATE TOOL BUTTON ===
-   Floats at the BOTTOM-LEFT of the canvas. Toggles floor-plate placement mode;
-   when armed (.is-active) it adopts the accent colour and the canvas shows a
-   ghosted dotted preview line tracking the cursor's elevation. */
-.floorplate-btn {
+/* === FLOATING HISTORY (UNDO/REDO) CONTROLS ===
+   Small button cluster ABSOLUTELY positioned at the TOP-LEFT of the canvas
+   (anchored inside .canvas-wrap, its positioning context — the same anchoring as
+   the .floorplate-btn, which pins to the BOTTOM-left of the canvas). Living inside
+   the canvas area keeps it clear of the left tool panel (no overlap with the
+   panel's controls), while z-index keeps it floating above the canvas. The two
+   buttons (.history-btn) are styled to MATCH the floating .floorplate-btn EXACTLY —
+   same control-token family (--control-* + --mini-shadow) so they read as siblings
+   of that button. They are COMPACT: tight horizontal padding (--space-2 instead of
+   --space-3) and a small inter-button gap (--space-1) so each is sized snugly to
+   its label and the pair sits as one tight cluster. A clear disabled state (dimmed
+   + not-allowed cursor) keeps undo/redo availability visible. */
+.history-controls {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 50;
+  display: flex;
+  gap: var(--space-1);
+}
+.history-btn {
+  height: var(--control-height);
+  padding: 0 var(--space-2);          /* compact — tighter than the default .btn */
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  box-shadow: var(--mini-shadow);
+}
+.history-btn:hover { background: var(--control-bg-hover); }
+.history-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Icon-only variant — Undo/Redo show just their arch arrow (no label), so the
+   button collapses to a SQUARE (width == --control-height) with the glyph centered
+   and the arrow bumped up a touch in size for legibility at the smaller footprint. */
+.history-btn--icon {
+  width: var(--control-height);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-lg);
+  line-height: 1;
+}
+/* Active treatment for the Statistics button (its dropdown is open), matching the
+   floor-plate / help buttons' accent fill so an open state reads consistently. */
+.history-btn.is-active {
+  background: var(--control-bg-active);
+  border-color: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+
+/* === STATISTICS DROPDOWN ===
+   The "Statistics" button sits in .history-controls next to Redo. Wrapping it in a
+   relatively-positioned anchor lets the dropdown pin directly BENEATH the button
+   (drops DOWN). The dropdown itself is TRANSPARENT-backed (--stats-dropdown-bg) so it
+   covers as little of the viewport as possible; the readout text carries a subtle
+   shadow (--stats-dropdown-text-shadow) so it stays legible against the canvas. It is
+   non-modal and pointer-transparent except for its text, so it never blocks canvas
+   interaction underneath. */
+.stats-anchor {
+  position: relative;
+  display: inline-flex;
+}
+.stats-dropdown {
+  position: absolute;
+  top: calc(100% + var(--stats-dropdown-gap));   /* drop DOWN, just below the button */
+  left: 0;
+  z-index: 51;                                   /* above the canvas/overlays */
+  width: var(--stats-dropdown-width);
+  display: flex;
+  flex-direction: column;
+  gap: var(--stats-dropdown-row-gap);
+  padding: var(--stats-dropdown-pad);
+  background: var(--stats-dropdown-bg);          /* transparent — minimal obstruction */
+  /* Let canvas pan/zoom pass THROUGH the dropdown's empty areas; the readout text is
+     informational only and needs no interaction. */
+  pointer-events: none;
+}
+.stats-dropdown .readout,
+.stats-dropdown .stats-dropdown__title {
+  text-shadow: var(--stats-dropdown-text-shadow);
+}
+.stats-dropdown__title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--color-text-dim);
+  margin-bottom: var(--space-1);
+}
+
+/* === BOTTOM-LEFT TOOL CLUSTER ===
+   Floor plate · Additive · Subtractive live in this flex row, pinned to the
+   BOTTOM-left of the canvas. Mirrors the top-left .history-controls: a single small
+   inter-button gap (--space-1) keeps the trio tightly spaced and sized to each
+   button's own content, instead of brittle hand-measured offsets. */
+.tool-controls {
   position: absolute;
   left: var(--space-3);
   bottom: var(--space-3);
+  z-index: 50;
+  display: flex;
+  gap: var(--space-1);
+}
+
+/* === FLOOR PLATE TOOL BUTTON ===
+   Toggles floor-plate placement mode; when armed (.is-active) it adopts the accent
+   colour and the canvas shows a ghosted dotted preview line tracking the cursor's
+   elevation. Sits in-flow as the first child of .tool-controls. */
+.floorplate-btn {
   height: var(--control-height);
   padding: 0 var(--space-3);
   background: var(--control-bg);
@@ -490,6 +863,207 @@ input[type="checkbox"] {
   background: var(--control-bg-active);
   border-color: var(--control-bg-active);
   color: var(--color-text-on-accent);
+}
+/* Disabled outside the unravel/elevation view (floor plates only render there).
+   Mirrors the established disabled pattern (.history-btn:disabled / .btn:disabled):
+   dimmed + not-allowed cursor. Hover is neutralised so it doesn't appear active. */
+.floorplate-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.floorplate-btn:disabled:hover { background: var(--control-bg); }
+
+/* === CENTERLINES / CW TYPE / MULLIONS / ERASER ===
+   In-flow siblings of the Floor plate button inside .tool-controls (bottom-left).
+   They share the Floor plate button's look exactly (same control-token family +
+   --mini-shadow) so the cluster reads as one; spacing comes from the flex
+   container's gap. CENTERLINES operates on the panel SELECTED via click (DISABLED
+   until one is selected); CW TYPE picks the curtain-wall system (always available);
+   MULLIONS is DISABLED until a CW Type is chosen — all use the same dimmed +
+   not-allowed disabled pattern as .floorplate-btn / .history-btn.
+   Button order: Centerlines · CW Type · Mullions · Eraser. */
+.cwtype-btn,
+.mullions-btn,
+.subtractive-btn,
+.eraser-btn,
+.view-btn {
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  box-shadow: var(--mini-shadow);
+}
+.cwtype-btn:hover,
+.mullions-btn:hover,
+.subtractive-btn:hover,
+.eraser-btn:hover,
+.view-btn:hover { background: var(--control-bg-hover); }
+/* Armed state (Centerlines division / Mullions / Eraser deletion tool active) —
+   mirrors .floorplate-btn.is-active. */
+.subtractive-btn.is-active,
+.mullions-btn.is-active,
+.eraser-btn.is-active,
+.view-btn.is-active {
+  background: var(--control-bg-active);
+  border-color: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+/* Disabled (no panel selected / no CW Type chosen) — mirror .floorplate-btn:disabled. */
+.cwtype-btn:disabled,
+.mullions-btn:disabled,
+.subtractive-btn:disabled,
+.eraser-btn:disabled,
+.view-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.cwtype-btn:disabled:hover,
+.mullions-btn:disabled:hover,
+.subtractive-btn:disabled:hover,
+.eraser-btn:disabled:hover,
+.view-btn:disabled:hover { background: var(--control-bg); }
+
+/* === CW TYPE chooser menu ===
+   The "CW Type" button opens a small two-option popup ABOVE it (Stick / Unitized).
+   Anchored to the button via a relative wrapper so it needs no JS positioning. */
+.cw-type-wrap { position: relative; display: inline-flex; }
+.cw-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--space-1));
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 100%;
+  padding: var(--space-1);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  white-space: nowrap;
+}
+.cw-menu__btn {
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+.cw-menu__btn:hover { background: var(--control-bg-hover); }
+.cw-menu__btn.is-active {
+  background: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+
+/* === HELP BUTTON ===
+   Round "?" button floating at the BOTTOM-RIGHT of the canvas (anchored inside
+   .canvas-wrap, its positioning context — the mirror of the floor-plate button's
+   bottom-left). Reuses the control colour/shadow family so it reads as a sibling
+   of the other floating canvas controls. When the popup is open (.is-active) it
+   adopts the accent fill, matching the floor-plate button's active treatment. */
+.help-btn {
+  position: absolute;
+  right: var(--help-btn-offset);
+  bottom: var(--help-btn-offset);
+  z-index: 50;
+  width: var(--help-btn-size);
+  height: var(--help-btn-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;               /* circular */
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  color: var(--control-text);
+  font-size: var(--help-btn-font-size);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--mini-shadow);
+}
+.help-btn:hover { background: var(--control-bg-hover); }
+.help-btn.is-active {
+  background: var(--control-bg-active);
+  border-color: var(--control-bg-active);
+  color: var(--color-text-on-accent);
+}
+
+/* === CONTROLS / HELP POPUP ===
+   Floating panel of all controls/keybindings, opened by the "?" button. Anchored
+   bottom-right just ABOVE the help button (offset by the button size + a gap).
+   Surfaces/border/shadow reuse the mini-window token family so it matches the
+   other floating overlays. A transparent full-canvas backdrop catches outside
+   clicks (dismiss) without darkening the workspace — function before aesthetic. */
+.help-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;                      /* above canvas/overlays, below the popup */
+  background: transparent;
+}
+.help-popup {
+  position: absolute;
+  right: var(--help-btn-offset);
+  /* Park the popup directly above the "?" button: clear the button's height plus
+     a small gap. */
+  bottom: calc(var(--help-btn-offset) + var(--help-btn-size) + var(--help-popup-gap));
+  z-index: 61;                      /* above the backdrop */
+  width: var(--help-popup-width);
+  max-height: var(--help-popup-max-height);
+  display: flex;
+  flex-direction: column;
+  background: var(--mini-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  overflow: hidden;
+  backdrop-filter: blur(2px);
+}
+.help-popup__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--control-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  background: var(--mini-titlebar-bg);
+  border-bottom: 1px solid var(--mini-border);
+  flex: 0 0 auto;
+}
+.help-popup__title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--mini-title-text);
+}
+.help-popup__close {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  line-height: 1;
+}
+.help-popup__close:hover { background: var(--control-bg-hover); color: var(--color-text); }
+.help-popup__body {
+  overflow-y: auto;                 /* scroll the list past the height cap */
+  min-height: 0;
+  padding: var(--space-2);
 }
 
 /* === UNRAVEL · PER-PANEL HEIGHT INPUT OVERLAY ===
@@ -550,6 +1124,11 @@ input[type="checkbox"] {
   padding: 0;
 }
 .unravel-input:focus { outline: none; } /* no border/box affordance when editing */
+/* SELECTED panel (double-clicked → the Additive / Subtractive target): its HEIGHT
+   field is recoloured to the faint floor-plate grey, matching the renderer drawing
+   the same panel's WIDTH label in --floorplate-color. Both dimension labels of the
+   selected panel thus read in the selection grey. */
+.unravel-input.is-selected { color: var(--floorplate-color); }
 /* Hide the type=number spinner chevrons so the field is pure text like the width
    label (the up/down arrows would otherwise sit inside the rotated field). The
    numeric commit logic (parseFloat in commitPanelInput) is unaffected. */
@@ -733,6 +1312,11 @@ input[type="checkbox"] {
   touch-action: none;             /* Let pointer events drive rotation, not browser gestures */
 }
 .mini__canvas:active { cursor: grabbing; }
+/* Plan-view affordance: a subtle inset outline marks a thumbnail currently
+   showing the top-down (plan) view, so the orthogonal state is discoverable. */
+.mini__canvas.is-plan {
+  box-shadow: inset 0 0 0 2px var(--mini-plan-outline);
+}
 
 .mini__meta {
   grid-area: meta;
@@ -800,3 +1384,290 @@ input[type="checkbox"] {
 .mini__iconbtn:hover { background: var(--control-bg-hover); color: var(--color-text); }
 .mini__iconbtn:disabled { opacity: 0.35; cursor: not-allowed; }
 .mini__iconbtn--danger:hover { background: var(--color-danger-wash); color: var(--color-danger); }
+
+/* Persistent footer pinned to the bottom of the mini-window (never scrolls away);
+   reuses the titlebar surface so it reads as part of the panel chrome. Holds the
+   "+" add button that saves the current sketch as a new preview. */
+.mini__footer {
+  flex: 0 0 auto;                        /* stay at the bottom; the body scrolls above it */
+  padding: var(--space-1);
+  background: var(--mini-titlebar-bg);
+  border-top: 1px solid var(--mini-border);
+}
+/* Full-width "+" add button — save the current sketch as a new saved preview. */
+.mini__addbtn {
+  width: 100%;
+  height: var(--control-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  background: var(--control-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+.mini__addbtn:hover { background: var(--control-bg-hover); }
+.mini__addbtn:disabled { opacity: 0.35; cursor: not-allowed; }
+/* The plus glyph — accented and slightly larger/bolder so the "add" reads clearly. */
+.mini__addbtn-plus {
+  color: var(--color-accent);
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* === SOLAR STUDY (larger massing popup) ===
+   Draggable dialog opened from a saved row's ☀ button. Centred in the stage until
+   dragged (then inline left/top take over, with transform reset in the component).
+   Surfaces/border/shadow reuse the --mini-* family so both themes work. */
+.solar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--solar-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--mini-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  overflow: hidden;
+  z-index: 20;                 /* above the mini-window (z 10) and canvas overlays */
+  backdrop-filter: blur(2px);
+}
+
+.solar__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--control-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  background: var(--mini-titlebar-bg);
+  border-bottom: 1px solid var(--mini-border);
+  cursor: move;                /* advertise drag-to-move */
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+.solar__title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--mini-title-text);
+}
+.solar__close {
+  border: none;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-lg);
+  line-height: 1;
+  width: var(--control-height);
+  height: var(--control-height);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.solar__close:hover { background: var(--color-danger-wash); color: var(--color-danger); }
+
+.solar__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.solar__canvas {
+  width: 100%;
+  height: var(--solar-canvas-height);
+  background: var(--mini-thumb-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius-sm);
+  display: block;
+  cursor: grab;                /* drag to orbit the massing */
+  touch-action: none;
+}
+.solar__canvas:active { cursor: grabbing; }
+
+.solar__location { display: flex; flex-direction: column; gap: var(--space-1); }
+.solar__location-title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--color-text-dim);
+}
+.solar__location-input {
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-family: var(--font-mono);
+  padding: 0 var(--space-2);
+}
+.solar__location-input:focus { outline: none; border-color: var(--color-accent); }
+
+/* --- Solar Study CONTROLS: cardinal-orientation dial + date/time sliders + site ---
+   Laid out as the compass dial on the left and the stacked sliders/fields on the
+   right. All colours come from the --solar-* / --control-* tokens above. */
+.solar__controls {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-3);
+}
+.solar__control { display: flex; flex-direction: column; gap: var(--space-1); }
+.solar__control--compass { align-items: center; flex: 0 0 auto; }
+.solar__control--sliders { flex: 1 1 auto; justify-content: center; gap: var(--space-2); }
+.solar__control-label {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--solar-control-label);
+}
+
+/* Compass dial — a fixed world ring (N at top) with a draggable needle that points
+   along the drawing's +Y; its bearing CW from north is the stored north offset. */
+.solar__compass {
+  position: relative;
+  width: var(--solar-compass-size);
+  height: var(--solar-compass-size);
+  border-radius: 50%;
+  background: var(--solar-compass-bg);
+  border: 1px solid var(--solar-compass-ring);
+  cursor: grab;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+.solar__compass:active { cursor: grabbing; }
+.solar__compass-tick {
+  position: absolute;
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--solar-compass-tick);
+  transform: translate(-50%, -50%);
+}
+.solar__compass-tick--n { left: 50%; top: 11%; }
+.solar__compass-tick--s { left: 50%; top: 89%; }
+.solar__compass-tick--e { left: 89%; top: 50%; }
+.solar__compass-tick--w { left: 11%; top: 50%; }
+/* Needle: a thin bar rooted at the dial centre pointing up at 0°, rotated CW by the
+   north offset (rotation applied inline in the component). */
+.solar__compass-needle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 42%;
+  background: var(--solar-needle-color);
+  border-radius: 2px;
+  transform-origin: 50% 100%;
+  pointer-events: none;
+}
+.solar__compass-needle::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 6px solid var(--solar-needle-color);
+}
+
+/* A slider row: caption, range track, and a monospace readout of the value. */
+.solar__slider-row {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+.solar__slider { width: 100%; accent-color: var(--solar-accent); cursor: pointer; }
+.solar__readout {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  color: var(--solar-readout);
+  min-width: 4.5rem;
+  text-align: right;
+}
+.solar__readout--muted { color: var(--solar-control-label); min-width: 0; }
+
+/* Numeric fields (north offset, latitude). */
+.solar__field { display: flex; align-items: center; gap: var(--space-1); }
+.solar__num {
+  width: 3.5rem;
+  height: var(--control-height);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  padding: 0 var(--space-1);
+}
+.solar__num--wide { width: 5rem; }
+.solar__num:focus { outline: none; border-color: var(--solar-accent); }
+.solar__unit { font-size: var(--font-size-small); color: var(--solar-control-label); }
+
+/* === OVERVIEW MAP ===
+   Floating, draggable navigator anchored to the BOTTOM-LEFT of the canvas by
+   default, lifted ABOVE the .tool-controls button row (via --overview-offset-*)
+   so it never overlaps the Floor plate / Subtractive / Additive cluster and,
+   living inside .canvas-wrap, stays clear of the left tool panel. Once dragged,
+   inline left/top take over (bottom/right reset to auto in the component). All
+   visual values come from the --overview-* tokens above (which themselves reuse
+   the --mini-* family, so dark mode works without extra overrides). */
+.overview {
+  position: absolute;
+  left: var(--overview-offset-left);
+  bottom: var(--overview-offset-bottom);
+  width: var(--overview-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--overview-bg);
+  border: 1px solid var(--overview-border);
+  border-radius: var(--radius);
+  box-shadow: var(--overview-shadow);
+  overflow: hidden;
+  z-index: 10;
+  backdrop-filter: blur(2px);
+}
+/* Slim, label-less drag strip. The centered grip bar (::before) advertises the
+   drag-to-move affordance in place of the old "Overview" text label. */
+.overview__titlebar {
+  position: relative;
+  height: var(--overview-grip-height);
+  background: var(--overview-titlebar-bg);
+  border-bottom: 1px solid var(--overview-border);
+  cursor: move;            /* advertise the drag-to-move affordance */
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+.overview__titlebar::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--overview-grip-width);
+  height: var(--overview-grip-thickness);
+  border-radius: 999px;
+  background: var(--overview-grip-color);
+}
+.overview__body {
+  padding: var(--space-1);
+}
+.overview__canvas {
+  display: block;
+  width: 100%;
+  height: var(--overview-canvas-height);
+  border: 1px solid var(--overview-border);
+  border-radius: var(--radius-sm);
+  background: var(--overview-canvas-bg);
+}

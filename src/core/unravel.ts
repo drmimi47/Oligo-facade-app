@@ -121,6 +121,125 @@ export function unravelPerimeter(p: Perimeter, gap: number): UnravelResult {
   return { segments, totalLength, totalWidth, clockwise };
 }
 
+/** Most equal columns a single Subtractive recommendation will divide a panel into
+ *  (caps the line count for absurdly thin desired widths near the panel border). */
+const MAX_EQUAL_COLUMNS = 200;
+
+/**
+ * Build the x-positions (MODEL units) of the vertical DIVISION lines that split an
+ * unravel panel into N EQUAL-WIDTH columns, where N is the iteration whose equal
+ * column width best matches the cursor's position. This drives the Subtractive
+ * tool's recommendations: hovering a panel suggests an even subdivision (2, 3, 4 …
+ * equal columns) rather than grid-snapped lines.
+ *
+ * Mapping: the desired column width is the cursor's distance from the panel's LEFT
+ * border (`cursorX - x0`); N is the nearest whole count that divides the panel
+ * evenly into columns of that width (`round(panelWidth / desired)`), clamped to
+ * `[2, MAX_EQUAL_COLUMNS]`. The returned lines are `x0 + i·(panelWidth/N)` for
+ * `i = 1 … N-1`, so all N columns are exactly equal. Pure: used by the live
+ * hover/drag preview AND the commit, so they always agree.
+ *
+ * Returns MODEL x positions ascending, strictly within (x0, x1). A cursor at or
+ * left of the left border yields no recommendation (`[]`).
+ */
+export function buildEqualColumns(cursorX: number, x0: number, x1: number): number[] {
+  const lo = Math.min(x0, x1);
+  const hi = Math.max(x0, x1);
+  const width = hi - lo;
+  const EPS = 1e-9;
+  if (width <= EPS) return [];
+
+  // Desired column width = cursor's distance from the left border.
+  const desired = cursorX - lo;
+  if (desired <= EPS) return [];
+
+  // Nearest equal-column COUNT matching that desired width (≥ 2 so it's a real split).
+  const n = Math.max(2, Math.min(MAX_EQUAL_COLUMNS, Math.round(width / desired)));
+  const step = width / n;
+  const xs: number[] = [];
+  for (let i = 1; i < n; i++) xs.push(lo + i * step);
+  return xs;
+}
+
+/**
+ * Build the y-positions (MODEL units) of the horizontal DIVISION lines that split an
+ * unravel panel into EQUAL-HEIGHT rows — the HORIZONTAL mirror of
+ * {@link buildEqualColumns}. This drives the Subtractive tool's recommendation when
+ * Shift is held: hovering a panel suggests an even subdivision (2, 3, 4 … equal rows)
+ * stacked from the baseline up, rather than equal columns.
+ *
+ * FLOOR-PLATE GUIDES. `guides` carries the floor-plate elevations (MODEL y, same space
+ * as the panel baseline `y0 = 0`). Any guide that falls strictly INSIDE the panel is a
+ * hard boundary the array must align to: the panel is split into bands at the baseline,
+ * each interior floor plate, and the top, and EACH band is independently subdivided into
+ * equal rows whose height best matches the cursor's desired height. The guide elevations
+ * themselves are emitted as division lines, so an array line always lands exactly ON
+ * every floor plate present (the user's requirement). With no interior guide this falls
+ * back to a single even split across the whole panel.
+ *
+ * Mapping: the desired row HEIGHT is the cursor's distance from the panel's BASELINE
+ * (`cursorY - y0`). For each band of height `bandH` the row count is
+ * `round(bandH / desired)`, clamped (≥ 1 per band; ≥ 2 overall for the no-guide case),
+ * so every band's rows are as close to the desired height as an even fit allows. Pure:
+ * used by BOTH the live hover/drag preview AND the commit, so they always agree.
+ *
+ * Returns MODEL y positions ascending, strictly within (y0, y1). A cursor at or below
+ * the baseline yields no recommendation (`[]`).
+ */
+export function buildEqualRows(
+  cursorY: number,
+  y0: number,
+  y1: number,
+  guides: number[] = [],
+): number[] {
+  const lo = Math.min(y0, y1);
+  const hi = Math.max(y0, y1);
+  const height = hi - lo;
+  const EPS = 1e-9;
+  if (height <= EPS) return [];
+
+  // Desired row height = cursor's distance from the baseline (bottom) border.
+  const desired = cursorY - lo;
+  if (desired <= EPS) return [];
+
+  // Floor-plate guides strictly inside the panel become hard band boundaries. The
+  // tolerance (1e-6) drops guides sitting on the baseline/top so they don't create a
+  // zero-height band; Set de-dups coincident plates.
+  const inner = Array.from(
+    new Set(guides.filter((g) => g > lo + 1e-6 && g < hi - 1e-6)),
+  ).sort((a, b) => a - b);
+
+  if (inner.length === 0) {
+    // No guides: even rows across the whole panel (original behaviour).
+    const n = Math.max(2, Math.min(MAX_EQUAL_COLUMNS, Math.round(height / desired)));
+    const step = height / n;
+    const ys: number[] = [];
+    for (let i = 1; i < n; i++) ys.push(lo + i * step);
+    return ys;
+  }
+
+  // Guides present: subdivide each band [baseline, guides…, top] independently and
+  // emit each interior guide so an array line lands on every floor plate.
+  const bounds = [lo, ...inner, hi];
+  const out: number[] = [];
+  for (let b = 0; b < bounds.length - 1; b++) {
+    const a = bounds[b];
+    const c = bounds[b + 1];
+    const bandH = c - a;
+    if (bandH <= EPS) continue;
+    // ≥ 1 row per band (a band may be too short for the desired height → no interior
+    // line, just its bounding floor plates).
+    const n = Math.max(1, Math.min(MAX_EQUAL_COLUMNS, Math.round(bandH / desired)));
+    const step = bandH / n;
+    for (let i = 1; i < n; i++) out.push(a + i * step);
+    // Emit the upper boundary when it's an interior guide (not the panel top), so the
+    // floor plate itself is a division line. Each interior guide is the upper bound of
+    // exactly one band, so it's added once.
+    if (b < bounds.length - 2) out.push(c);
+  }
+  return out.sort((x, y) => x - y);
+}
+
 /**
  * Build a throwaway open Perimeter from an unravel layout's RECTANGLE corners, so
  * the existing `fitViewport` can frame the whole strip without duplicating bounds

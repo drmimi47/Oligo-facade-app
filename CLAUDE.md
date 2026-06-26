@@ -37,6 +37,28 @@ visual changes are easy to locate and make without touching application logic.
 - When adding a new UI element, add its visual tokens to the CSS file with a descriptive comment rather
   than inlining styles.
 
+## Controls documentation — single source of truth
+
+The `ControlsList` component in `src/PolylineTool.tsx` — surfaced through the bottom-right **"?"** help
+button popup — is the **single source of truth** for the application's user controls. It MUST document
+the complete, current set of interactions at all times.
+
+- **Every relevant control belongs there**, across all input modalities:
+  - **Pointer / mouse** — e.g. left-click to place a vertex, click-drag to pull curve handles, drag a
+    vertex or handle knob in edit mode, Alt-drag, click a segment to insert, double-click a vertex to
+    make a corner.
+  - **Keyboard shortcuts** — e.g. Escape (cancel / exit), Enter and double-click to close, Backspace
+    (remove last / delete selected), Ctrl+Z / Ctrl+Y (and Ctrl+Shift+Z) undo/redo, Ctrl+S save, A / L
+    curve types, Shift to constrain.
+  - **Trackpad / navigation gestures** — e.g. wheel/pinch zoom (at cursor), middle-drag and
+    right-click-drag pan, and minimap interactions (double-click for top-down/plan view, drag to rotate).
+- **Keeping this list complete and accurate is part of the change, not a follow-up.** Whenever a
+  user-facing control or interaction is **added, removed, or changed**, update `ControlsList` in the
+  **same** change so it always reflects reality. Adding a control without documenting it here — or
+  leaving a stale/incorrect entry behind — is **incomplete work**.
+- Write entries in the existing style: concise, professional, **action → result** (bold control,
+  short plain-language effect). Do not invent controls that do not exist.
+
 ## Working agreement
 
 - Before introducing a new framework, dependency, or architectural pattern, briefly note the choice and
