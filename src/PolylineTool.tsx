@@ -187,6 +187,8 @@ interface DocSnapshot {
   /** Per-edge UNITIZED per-cell framing insets (Framing tool, Unitized system).
    *  panel edge → cell index → the four edge insets. Replaced, never mutated. */
   panelCellFraming: Record<number, Record<number, CellInsets>>;
+  /** Per-edge assigned curtain-wall system (Stick / Unitized). Replaced, never mutated. */
+  panelCwType: Record<number, CwType>;
   unravelHeight: number;
   /** Placed floor-plate elevations (model Y). Replaced, never mutated. */
   floorPlates: number[];
@@ -334,17 +336,19 @@ export default function PolylineTool() {
   // stroke, committed as one undo step on pointer-up. Empty when not dragging.
   const [eraseDragCollected, setEraseDragCollected] = useState<EraseTarget[]>([]);
   // CELL VIEW MODE — a purely VISUAL display cycle for the elevation/Panels view
-  // (the "View" button, next to Eraser). "normal" is the default look; "materialId"
+  // (the "View" button, last in the bottom-left cluster). "normal" is the default look; "materialId"
   // tints every grid CELL by its geometric SHAPE (width × height) in a unique colour
   // — like Lumion's Material ID — so identical cells across the whole project read in
   // the same colour at a glance. Not a tool (it arms nothing, mutates no document
   // state) and not persisted: it is an ephemeral way of LOOKING at the model. The
   // "View" button cycles through CELL_VIEW_MODES in order.
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("normal");
-  // CURTAIN-WALL TYPE: the chosen fabrication system (Stick / Unitized), or null until
-  // the user picks one from the "CW Type" button's menu. Selecting one relabels the
-  // button and unlocks the Mullions tool. A project-level spec (not per-panel).
-  const [cwType, setCwType] = useState<CwType | null>(null);
+  // CURTAIN-WALL TYPE — assigned PER PANEL (edge index → system). Each panel carries at
+  // most ONE system (Stick or Unitized); the "CW Type" menu sets it for the focused
+  // panel. Switching a panel's type clears that panel's framing of the OTHER system
+  // (its centerlines are kept) — see selectCwType — so a panel never mixes Stick bands
+  // and Unitized cell insets. Absent = no system chosen for that panel yet.
+  const [panelCwType, setPanelCwType] = useState<Record<number, CwType>>({});
   // Is the CW Type two-option chooser menu open?
   const [cwMenuOpen, setCwMenuOpen] = useState(false);
   // MULLIONS tool armed? Only available once a CW Type is chosen. Mutually exclusive
@@ -378,6 +382,12 @@ export default function PolylineTool() {
   // The panel (edge index) currently zoomed-to via double-click, or null. Esc
   // restores the full-strip fit and clears this.
   const [focusedPanel, setFocusedPanel] = useState<number | null>(null);
+  // The ACTIVE curtain-wall type: the FOCUSED panel's assigned system, or null when no
+  // panel is focused / the focused panel has no system yet. Derived from the per-panel
+  // map so all the existing Framing logic (which already operates on the focused panel)
+  // reads "this panel's system" with no further changes. Drives the Framing tool's
+  // Stick-vs-Unitized behaviour, the menu's active mark, and button enablement.
+  const cwType: CwType | null = focusedPanel !== null ? panelCwType[focusedPanel] ?? null : null;
   // The grid CELL (within focusedPanel) currently zoomed-to in the Assembly phase,
   // identified by its model-space rectangle bounds, or null. Set by the Assembly nav
   // button (defaults to the top-left-most cell) and by double-clicking a cell here.
@@ -511,8 +521,8 @@ export default function PolylineTool() {
   const [redoStack, setRedoStack] = useState<DocSnapshot[]>([]);
   // Always-current document snapshot, refreshed every render, so the capture and
   // undo/redo helpers read fresh values without stale-closure bugs.
-  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, unravelHeight, floorPlates });
-  docRef.current = { perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, unravelHeight, floorPlates };
+  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates });
+  docRef.current = { perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates };
   // Pre-interaction snapshot for a drag / field edit, pushed on the FIRST actual
   // change (so a no-op press/focus never creates an empty undo step).
   const pendingRef = useRef<DocSnapshot | null>(null);
@@ -548,6 +558,7 @@ export default function PolylineTool() {
     setPanelMullionsV(d.panelMullionsV);
     setPanelMullionsH(d.panelMullionsH);
     setPanelCellFraming(d.panelCellFraming);
+    setPanelCwType(d.panelCwType);
     setUnravelHeight(d.unravelHeight);
     setFloorPlates(d.floorPlates);
     setSelectedVertex(-1);
@@ -1112,10 +1123,52 @@ export default function PolylineTool() {
   // tool. The curtain-wall system is a project-level spec, so the button is always
   // available — it is NOT gated on a selected panel.
   const onCwType = useCallback(() => setCwMenuOpen((open) => !open), []);
-  const selectCwType = useCallback((t: CwType) => {
-    setCwType(t);
-    setCwMenuOpen(false);
-  }, []);
+  /**
+   * Assign curtain-wall system `t` to the FOCUSED panel. Because a panel may carry only
+   * one system, switching to a DIFFERENT type clears that panel's framing of the other
+   * system — Stick mullion bands (panelMullionsV/H) when switching to Unitized, Unitized
+   * cell insets (panelCellFraming) when switching to Stick — while KEEPING its
+   * centerlines (panelDivisions / panelDividersH). No-op if the panel already has `t`.
+   * One undoable step. Requires a focused panel (the button is disabled otherwise).
+   */
+  const selectCwType = useCallback(
+    (t: CwType) => {
+      setCwMenuOpen(false);
+      if (focusedPanel === null) return;
+      const edge = focusedPanel;
+      if (panelCwType[edge] === t) return; // already this system — nothing to change
+      recordHistory();
+      setPanelCwType((prev) => ({ ...prev, [edge]: t }));
+      // Drop the now-incompatible framing for this panel (centerlines are untouched).
+      if (t === "unitized") {
+        setPanelMullionsV((prev) => {
+          if (prev[edge] === undefined) return prev;
+          const next = { ...prev };
+          delete next[edge];
+          return next;
+        });
+        setPanelMullionsH((prev) => {
+          if (prev[edge] === undefined) return prev;
+          const next = { ...prev };
+          delete next[edge];
+          return next;
+        });
+      } else {
+        setPanelCellFraming((prev) => {
+          if (prev[edge] === undefined) return prev;
+          const next = { ...prev };
+          delete next[edge];
+          return next;
+        });
+      }
+      // Drop any in-flight framing previews so a stale draft can't re-apply the old type.
+      setMullionHover(null);
+      setMullionDraft(null);
+      setCellEdgeHover(null);
+      setCellFrameDraft(null);
+    },
+    [focusedPanel, panelCwType, recordHistory],
+  );
 
   // MULLIONS: becomes available only once a CW Type is chosen. Mutually exclusive with
   // every other tool in the cluster (arming it disarms Floor plate / Centerlines /
@@ -2480,8 +2533,8 @@ export default function PolylineTool() {
    * auto-save effect below has a stable, value-equal dependency to compare.
    */
   const currentElevation: SavedElevationState = useMemo(
-    () => ({ unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, unravelHeight, floorPlates }),
-    [unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, unravelHeight, floorPlates],
+    () => ({ unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates }),
+    [unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates],
   );
 
   /** Capture the current perimeter + elevation state as a NEW saved entry. */
@@ -2518,6 +2571,8 @@ export default function PolylineTool() {
       setPanelMullionsH({ ...(s.panelMullionsH ?? {}) });
       // Unitized per-cell framing is a nested map — deep-copy both object levels.
       setPanelCellFraming(cloneCellFraming(s.panelCellFraming ?? {}));
+      // Per-panel curtain-wall system assignment (flat map) — fresh container.
+      setPanelCwType({ ...(s.panelCwType ?? {}) });
       setUnravelHeight(s.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT);
       setFloorPlates([...(s.floorPlates ?? [])]);
       // Restore the entry's geo-location (blank for older saves with none).
@@ -2605,6 +2660,7 @@ export default function PolylineTool() {
         JSON.stringify(cur.panelMullionsV ?? {}) === JSON.stringify(panelMullionsV) &&
         JSON.stringify(cur.panelMullionsH ?? {}) === JSON.stringify(panelMullionsH) &&
         JSON.stringify(cur.panelCellFraming ?? {}) === JSON.stringify(panelCellFraming) &&
+        JSON.stringify(cur.panelCwType ?? {}) === JSON.stringify(panelCwType) &&
         (cur.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT) === unravelHeight &&
         JSON.stringify(cur.floorPlates ?? []) === JSON.stringify(floorPlates);
       // Location is metadata, compared the same way (a blank live location matches a
@@ -2627,13 +2683,14 @@ export default function PolylineTool() {
         panelMullionsV: elev.panelMullionsV,
         panelMullionsH: elev.panelMullionsH,
         panelCellFraming: elev.panelCellFraming,
+        panelCwType: elev.panelCwType,
         unravelHeight: elev.unravelHeight,
         floorPlates: elev.floorPlates,
         location: cloneLocation(location),
       };
       return next;
     });
-  }, [activeSavedId, perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, unravelHeight, floorPlates, currentElevation, location, setSaved]);
+  }, [activeSavedId, perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates, currentElevation, location, setSaved]);
 
   // Persist whenever the saved list changes (keeps localStorage in sync).
   useEffect(() => {
@@ -3605,16 +3662,23 @@ export default function PolylineTool() {
             >
               Centerlines
             </button>
-            {/* CW TYPE — pick the curtain-wall fabrication system. Opens a two-option
-                menu (Stick / Unitized); the chosen one relabels the button to
-                "CW Type: <name>" and unlocks the Framing tool. Always available. */}
+            {/* CW TYPE — assign the curtain-wall system to the SELECTED panel. Opens a
+                two-option menu (Stick / Unitized); the chosen one relabels the button to
+                "CW Type: <name>" and unlocks the Framing tool for that panel. Disabled
+                until a panel is selected, since the system is per-panel. Switching a
+                panel's type clears its framing of the other system (centerlines kept). */}
             <div className="cw-type-wrap">
               <button
                 className="cwtype-btn"
                 onClick={onCwType}
+                disabled={!hasSelectedPanel}
                 aria-haspopup="true"
                 aria-expanded={cwMenuOpen}
-                title="Choose the curtain-wall system type (Stick or Unitized)"
+                title={
+                  hasSelectedPanel
+                    ? "Assign the curtain-wall system (Stick or Unitized) to the selected panel. Switching clears that panel's framing of the other system (centerlines are kept)."
+                    : "Click a panel (unravel view) to select it, then assign its CW Type."
+                }
               >
                 {cwType ? `CW Type: ${CW_TYPE_LABELS[cwType]}` : "CW Type"}
               </button>
@@ -3643,7 +3707,7 @@ export default function PolylineTool() {
               aria-pressed={mullionsOn}
               title={
                 cwType === null
-                  ? "Select a CW Type first to enable Framing."
+                  ? "Select a panel and assign its CW Type first to enable Framing."
                   : cwType === "unitized"
                     ? "Framing (Unitized) — in the Panels tab, drag a cell's edge to inset it (Shift = all four edges). The change mirrors to every same-shape (Material ID) cell across the project."
                     : "Framing (Stick) — in the Panels tab, drag a grid line to set the framing offset for that whole axis."
@@ -3651,32 +3715,14 @@ export default function PolylineTool() {
             >
               Framing
             </button>
-            {/* ERASER button — LAST in the cluster (after Framing). Deletes both
-                division lines on the focused panel AND floor plates. Enabled whenever
-                the unravel view is open (floor plates are global; no panel selection
-                needed). While armed, hovering near a division line or floor plate
-                highlights it; a click removes it (one undo step each). Mutually
-                exclusive with Centerlines/Mullions/Floor plate. */}
-            <button
-              className={`eraser-btn ${eraserOn ? "is-active" : ""}`}
-              onClick={onEraser}
-              disabled={!unravelOn}
-              aria-pressed={eraserOn}
-              title={
-                unravelOn
-                  ? "Erase: hover near a division line (on the selected panel) or a floor plate to highlight it, then click to delete it. One undo step each. Esc to finish."
-                  : "Enter the unravel view to use the eraser."
-              }
-            >
-              Eraser
-            </button>
             {/* VIEW button — a purely VISUAL display cycle for the elevation/Panels
                 view (NOT a tool: arms nothing, edits nothing, never mutually exclusive
-                with the cluster). Clicking cycles the cell view mode; in "Material ID"
-                every grid cell is tinted by its geometric SHAPE so identical cells
-                across the whole project read in one colour (Lumion-style Material ID).
-                The unique-cell count lives in the Statistics dropdown. Disabled outside
-                the unravel view, where there are no cells to colour. */}
+                with the cluster). LAST in the cluster (the Eraser now lives by the "?"
+                help button, bottom-right). Clicking cycles the cell view mode; in
+                "Material ID" every grid cell is tinted by its geometric SHAPE so
+                identical cells across the whole project read in one colour (Lumion-style
+                Material ID). The unique-cell count lives in the Statistics dropdown.
+                Disabled outside the unravel view, where there are no cells to colour. */}
             <button
               className={`view-btn ${cellViewMode !== "normal" ? "is-active" : ""}`}
               onClick={onCycleView}
@@ -3872,6 +3918,25 @@ export default function PolylineTool() {
             unravelDraws={unravelDraws}
             stageRef={wrapRef}
           />
+          {/* ERASER button — floats at the BOTTOM-RIGHT, just LEFT of the "?" help
+              button (anchored in .canvas-wrap). Deletes division lines on the focused
+              panel AND floor plates. Enabled whenever the unravel view is open (floor
+              plates are global; no panel selection needed). While armed, hovering near a
+              division line or floor plate highlights it; a click removes it (one undo
+              step each). Mutually exclusive with Centerlines/Framing/Floor plate. */}
+          <button
+            className={`eraser-btn ${eraserOn ? "is-active" : ""}`}
+            onClick={onEraser}
+            disabled={!unravelOn}
+            aria-pressed={eraserOn}
+            title={
+              unravelOn
+                ? "Erase: hover near a division line (on the selected panel) or a floor plate to highlight it, then click to delete it. One undo step each. Esc to finish."
+                : "Enter the unravel view to use the eraser."
+            }
+          >
+            Eraser
+          </button>
           {/* HELP "?" button — floats at the BOTTOM-RIGHT of the canvas (anchored
               in .canvas-wrap like the floor-plate / history clusters). Toggles the
               controls/keybindings popup. */}
@@ -3985,12 +4050,12 @@ function ControlsList() {
       <li><b>Assembly view</b> dimensions the selected cell on all four sides: a <b>width</b> label on the top and bottom edges, a <b>height</b> label on the left and right edges</li>
       <li><b>Hover an edge</b> (Assembly view) of the selected cell highlights that edge <b>red</b> (top / right / bottom / left, one at a time) to mark it as selected</li>
       <li><b>Click a panel</b> (Elevations) selects + zooms it (its width/height labels turn grey) and enables the <b>Centerlines</b> button (bottom-left, next to Floor plate) · click the empty canvas (or Esc) to step back out</li>
-      <li><b>CW Type</b> (bottom-left cluster) pick the curtain-wall system — click to choose <b>Stick System</b> or <b>Unitized System</b> · the button then shows "CW Type: <i>name</i>" and unlocks <b>Framing</b></li>
-      <li><b>Framing</b> (before Eraser) becomes available once a CW Type is selected, and acts in the <b>Panels</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal)</li>
-      <li>with the <b>Unitized System</b>, hover a cell's centerlines to highlight the <b>single nearest edge</b> of the cell under the cursor, then <b>click-drag</b> to inset that one edge <b>into the cell</b> in <b>0.25′</b> increments · hold <b>Shift</b> while dragging to inset <b>all four edges</b> of that cell together · the edit <b>mirrors live to every same-shape (Material ID) cell</b> across all elevations/panels — editing one cell updates all identical cells project-wide (see the <b>View</b> button's Material ID colours / <b>Unique cells</b> count for the groups)</li>
+      <li><b>CW Type</b> (bottom-left cluster) assigns the curtain-wall system <b>per panel</b> — select a panel, then click to choose <b>Stick System</b> or <b>Unitized System</b> · the button shows the selected panel's "CW Type: <i>name</i>" and unlocks <b>Framing</b> · a panel holds only ONE system, so switching its type <b>clears that panel's framing of the other system</b> (its centerlines are kept)</li>
+      <li><b>Framing</b> (before View) becomes available once the selected panel has a CW Type, and acts in the <b>Panels</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal)</li>
+      <li>with the <b>Unitized System</b>, hover a cell's centerlines to highlight the <b>single nearest edge</b> of the cell under the cursor, then <b>click-drag</b> to inset that one edge <b>into the cell</b> in <b>0.25′</b> increments · hold <b>Shift</b> while dragging to inset <b>all four edges</b> of that cell together · each framed edge draws the solid frame face inset into the cell AND turns the affected <b>centerline segment solid</b> on top of the dashed centerline (the framed mullion) · the edit <b>mirrors live to every same-shape (Material ID) cell</b> across all elevations/panels — editing one cell updates all identical cells project-wide (see the <b>View</b> button's Material ID colours / <b>Unique cells</b> count for the groups)</li>
       <li><b>Centerlines</b> (selected panel) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · Esc or re-click the button to finish</li>
-      <li><b>Eraser</b> (last in the bottom-left cluster) arms the delete tool: available whenever the unravel view is open · <b>hover</b> near any panel's centerline <em>or</em> a floor plate (no need to click into the panel first) to highlight it · <b>click</b> deletes it · <b>click-drag</b> across multiple lines to erase them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · the default <b>0′ ground floor plate</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor plate</li>
-      <li><b>View</b> (after Eraser, unravel view only) <b>click</b> cycles the display mode — purely visual, arms no tool · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a Grasshopper-style gradient — <b>N = dark blue</b>, <b>E = blue</b>, <b>S = yellow</b>, <b>W = orange</b>, with NE/SE/SW/NW on the blends between — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map</li>
+      <li><b>Eraser</b> (bottom-right, just left of the <b>?</b> help button) arms the delete tool: available whenever the unravel view is open · <b>hover</b> near any panel's centerline <em>or</em> a floor plate (no need to click into the panel first) to highlight it · <b>click</b> deletes it · <b>click-drag</b> across multiple lines to erase them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · the default <b>0′ ground floor plate</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor plate</li>
+      <li><b>View</b> (last in the bottom-left cluster, unravel view only) <b>click</b> cycles the display mode — purely visual, arms no tool · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a Grasshopper-style gradient — <b>N = dark blue</b>, <b>E = blue</b>, <b>S = yellow</b>, <b>W = orange</b>, with NE/SE/SW/NW on the blends between — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map</li>
       <li><b>Hover an edge</b> (edit mode) highlights that edge's line on the active mini-window thumbnail · in unravel, hovering a panel lights its wall instead</li>
       <li><b>Mini-window:</b> click load (fits the shape to the view) · drag preview to rotate · double-click preview for top-down plan view · drag title to move · ☀ toggle a larger <b>Solar Study</b> popup · ✎ rename · × delete · <b>＋ footer</b> saves the current sketch as a new preview</li>
       <li><b>Solar Study</b> (☀ popup) draws a 3D <b>sun-path dome</b> around the massing from real solar geometry · drag to rotate · double-click for an aerial top-down view (synced with the thumbnail) · <b>Orientation dial</b> — drag the needle (or type degrees) to set the drawing's North relative to the cardinal directions · <b>Date</b> and <b>Solar time</b> sliders move the sun along its path (with a live altitude / azimuth readout) · <b>Latitude</b> field (temporary Omaha, NE default until the address is geocoded) · Location field inherits the sketch's address · settings are saved with the sketch</li>

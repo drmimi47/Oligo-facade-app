@@ -998,6 +998,18 @@ input[type="checkbox"] {
   color: var(--color-text-on-accent);
 }
 
+/* ERASER button placement — lifted out of the bottom-left tool cluster to float at
+   the BOTTOM-RIGHT, just LEFT of the round "?" help button. Keeps the shared button
+   look (from the .eraser-btn rule in the cluster group above); only the absolute
+   corner placement is added here. Cleared horizontally past the help button by its
+   diameter + a gap, and vertically centred against it (the help button is taller). */
+.eraser-btn {
+  position: absolute;
+  right: calc(var(--help-btn-offset) + var(--help-btn-size) + var(--space-2));
+  bottom: calc(var(--help-btn-offset) + (var(--help-btn-size) - var(--control-height)) / 2);
+  z-index: 50;
+}
+
 /* === CONTROLS / HELP POPUP ===
    Floating panel of all controls/keybindings, opened by the "?" button. Anchored
    bottom-right just ABOVE the help button (offset by the button size + a gap).

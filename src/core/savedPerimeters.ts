@@ -41,6 +41,9 @@ export interface CellInsets {
   left: number;
 }
 
+/** Curtain-wall fabrication system assignable to a panel (Stick vs Unitized). */
+export type CwType = "stick" | "unitized";
+
 export interface SavedElevationState {
   /** Per-edge-index height overrides (model units). */
   unravelHeights: Record<number, number>;
@@ -64,6 +67,9 @@ export interface SavedElevationState {
    *  four edges (model feet). Set by the Framing tool under the Unitized CW system.
    *  Absent/empty = no per-cell framing. */
   panelCellFraming: Record<number, Record<number, CellInsets>>;
+  /** Per-edge-index assigned curtain-wall system (Stick / Unitized). A panel carries at
+   *  most one system; absent = none chosen yet. */
+  panelCwType: Record<number, CwType>;
   /** Global default wall height (model units). */
   unravelHeight: number;
   /** Placed floor-plate elevations (model Y). */
@@ -132,6 +138,9 @@ export interface SavedPerimeter {
   /** Per-edge UNITIZED per-cell framing insets (Framing tool, Unitized system).
    *  OPTIONAL so older entries still load (defaulted to {} on load). */
   panelCellFraming?: Record<number, Record<number, CellInsets>>;
+  /** Per-edge curtain-wall system assignment (Stick / Unitized). OPTIONAL so older
+   *  entries still load (defaulted to {} on load). */
+  panelCwType?: Record<number, CwType>;
   /**
    * Optional SOLAR-STUDY settings (the Solar Study popup): the sketch's cardinal
    * orientation (`northOffset`), site latitude/longitude, and the studied day +
@@ -207,6 +216,8 @@ export function cloneElevationState(e: SavedElevationState): SavedElevationState
     panelMullionsH: { ...e.panelMullionsH },
     // Unitized per-cell framing is a nested map — deep-copy both object levels.
     panelCellFraming: cloneCellFraming(e.panelCellFraming),
+    // Per-panel system assignment is a flat map — a fresh container is a sufficient copy.
+    panelCwType: { ...e.panelCwType },
     unravelHeight: e.unravelHeight,
     floorPlates: [...e.floorPlates],
   };
@@ -244,6 +255,7 @@ export function makeSavedPerimeter(
     panelMullionsV: elev.panelMullionsV,
     panelMullionsH: elev.panelMullionsH,
     panelCellFraming: elev.panelCellFraming,
+    panelCwType: elev.panelCwType,
     unravelHeight: elev.unravelHeight,
     floorPlates: elev.floorPlates,
     location: cloneLocation(location),
@@ -296,6 +308,7 @@ export function loadSaved(): SavedPerimeter[] {
         panelMullionsV: s.panelMullionsV ?? {},
         panelMullionsH: s.panelMullionsH ?? {},
         panelCellFraming: s.panelCellFraming ?? {},
+        panelCwType: s.panelCwType ?? {},
         unravelHeight: s.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT,
         floorPlates: s.floorPlates ?? [],
       }));

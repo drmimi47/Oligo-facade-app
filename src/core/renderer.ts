@@ -1047,6 +1047,12 @@ function drawUnravel(
     // left/right = vertical faces). Unlike the Stick bands (which move a whole axis),
     // these are per-cell, per-edge — one edge of one cell at a time, or all four with
     // Shift. Drawn in the same framing colour as the Stick faces.
+    //
+    // For each framed edge we draw TWO solid lines (the frame profile): the inset face
+    // AND a solid line ON the cell EDGE itself. That edge line overlays the dashed
+    // CENTERLINE (or panel border) for exactly this cell's span, so the centerline
+    // segment a frame is generated against reads as a SOLID framed mullion, not a bare
+    // dashed centerline. Drawn after the dashed centerlines above, so it sits on top.
     if (cellFraming && cellFraming.length > 0) {
       ctx.strokeStyle = tk.unravelMullion;
       ctx.lineWidth = tk.segmentW;
@@ -1059,10 +1065,26 @@ function drawUnravel(
         ctx.stroke();
       };
       for (const fc of cellFraming) {
-        if (fc.top > 0) seg2(fc.x0, fc.y1 - fc.top, fc.x1, fc.y1 - fc.top);
-        if (fc.bottom > 0) seg2(fc.x0, fc.y0 + fc.bottom, fc.x1, fc.y0 + fc.bottom);
-        if (fc.left > 0) seg2(fc.x0 + fc.left, fc.y0, fc.x0 + fc.left, fc.y1);
-        if (fc.right > 0) seg2(fc.x1 - fc.right, fc.y0, fc.x1 - fc.right, fc.y1);
+        // top: inset face + solid line on the cell's top edge (centerline at y1).
+        if (fc.top > 0) {
+          seg2(fc.x0, fc.y1 - fc.top, fc.x1, fc.y1 - fc.top);
+          seg2(fc.x0, fc.y1, fc.x1, fc.y1);
+        }
+        // bottom: inset face + solid line on the cell's bottom edge (centerline at y0).
+        if (fc.bottom > 0) {
+          seg2(fc.x0, fc.y0 + fc.bottom, fc.x1, fc.y0 + fc.bottom);
+          seg2(fc.x0, fc.y0, fc.x1, fc.y0);
+        }
+        // left: inset face + solid line on the cell's left edge (centerline at x0).
+        if (fc.left > 0) {
+          seg2(fc.x0 + fc.left, fc.y0, fc.x0 + fc.left, fc.y1);
+          seg2(fc.x0, fc.y0, fc.x0, fc.y1);
+        }
+        // right: inset face + solid line on the cell's right edge (centerline at x1).
+        if (fc.right > 0) {
+          seg2(fc.x1 - fc.right, fc.y0, fc.x1 - fc.right, fc.y1);
+          seg2(fc.x1, fc.y0, fc.x1, fc.y1);
+        }
       }
     }
     // Framing-tool hover (Unitized): re-stroke the targeted cell EDGE(s) in the highlight
