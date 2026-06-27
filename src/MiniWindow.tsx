@@ -93,13 +93,15 @@ interface MiniWindowProps {
   /**
    * Per-ORIGINAL-edge-index height overrides for the LIVE editor shape (model
    * units). Like {@link highlightEdge}, these only apply to the ACTIVE entry's
-   * thumbnail (the one whose geometry matches the live shape); non-active
-   * thumbnails extrude uniformly to {@link defaultHeight}.
+   * thumbnail (the one whose geometry matches the live shape). Non-active thumbnails
+   * extrude from their OWN stored per-edge heights ({@link SavedPerimeter.unravelHeights})
+   * instead, so every preview shows its walls at their real saved heights.
    */
   heights?: Record<number, number>;
   /**
-   * Global/default wall height (model units) for ALL thumbnails. Changing it
-   * updates every preview uniformly; per-edge `heights` only affect the active one.
+   * Global/default wall height (model units) — the fallback for walls without a
+   * per-edge override on the ACTIVE / live shape. Non-active thumbnails fall back to
+   * their OWN stored default ({@link SavedPerimeter.unravelHeight}) instead.
    */
   defaultHeight?: number;
   /**
@@ -251,12 +253,9 @@ export default function MiniWindow({
       </div>
 
       {/* ===== GALLERY BODY ===== */}
-      {!collapsed && (
+      {!collapsed && saved.length > 0 && (
         <div className="mini__body">
-          {saved.length === 0 ? (
-            <div className="mini__empty">No projects yet. Use ＋ below to save the current sketch.</div>
-          ) : (
-            <ul className="mini__list">
+          <ul className="mini__list">
               {saved.map((s, i) => (
                 <Thumb
                   key={s.id}
@@ -277,8 +276,9 @@ export default function MiniWindow({
                   // Perimeter-mode hover highlights the edge as a line; unravel-mode
                   // hover fills the wall panel.
                   highlightAsLine={highlightAsLine ?? false}
-                  // Per-edge heights belong to the live shape, so only the active
-                  // entry honours them; others extrude uniformly to the default.
+                  // Live per-edge heights belong to the editor shape, so only the active
+                  // entry honours them; non-active thumbnails extrude from their OWN
+                  // stored unravelHeights (handled inside Thumb).
                   heights={s.id === activeId ? heights : undefined}
                   defaultHeight={defaultHeight}
                   // The active entry mirrors the LIVE editor shape so footprint /
@@ -307,8 +307,7 @@ export default function MiniWindow({
                   }}
                 />
               ))}
-            </ul>
-          )}
+          </ul>
         </div>
       )}
 
@@ -428,7 +427,7 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
   // the stored shape/uniform heights. The preview stays exactly as it was shown.
   // (The camera/perspective already persists as local Thumb state across the
   // active→inactive transition, so only geometry needs explicit freezing.)
-  const frozenRef = useRef<{ geom: Perimeter; heights?: Record<number, number> } | null>(null);
+  const frozenRef = useRef<{ geom: Perimeter; heights?: Record<number, number>; defaultHeight?: number } | null>(null);
   // Tracks the stored snapshot identity so we can drop the frozen massing if the
   // save itself is overwritten (e.g. auto-save writes a new perimeter snapshot)
   // and let the fresh snapshot show.
@@ -551,33 +550,50 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
     }
 
     // While ACTIVE this thumbnail mirrors the LIVE editor shape; record that exact
-    // massing (footprint + per-edge heights) so it persists, frozen, once the entry
-    // goes inactive instead of snapping back to the stored snapshot.
+    // massing (footprint + per-edge heights + the global default in effect) so it
+    // persists, frozen, once the entry goes inactive instead of snapping back to the
+    // stored snapshot.
     if (livePerimeter) {
-      frozenRef.current = { geom: livePerimeter, heights };
+      frozenRef.current = { geom: livePerimeter, heights, defaultHeight };
     }
 
     // Render priority: live shape (active) -> last frozen live massing (was active,
-    // now clicked away) -> stored snapshot (never edited live). This keeps an
-    // inactive preview exactly as it was last shown.
+    // now clicked away) -> stored snapshot (never edited live). For each source pick
+    // the MATCHING per-edge heights AND global default so every wall is extruded to its
+    // real height, not a uniform fallback:
+    //   - live   : the live editor's per-edge heights + global default
+    //   - frozen : the heights + default captured while it was active
+    //   - stored : the ENTRY'S OWN saved heights + default. This fixes the visual bug
+    //     where an inactive preview showed every wall at the uniform default height and
+    //     only "corrected" to the real saved heights once the entry was clicked into.
     const frozen = livePerimeter ? null : frozenRef.current;
     const geom = livePerimeter ?? frozen?.geom ?? saved.perimeter;
-    const renderHeights = livePerimeter ? heights : frozen?.heights;
+    let renderHeights: Record<number, number> | undefined;
+    let renderDefaultHeight: number | undefined;
+    if (livePerimeter) {
+      renderHeights = heights;
+      renderDefaultHeight = defaultHeight;
+    } else if (frozen) {
+      renderHeights = frozen.heights;
+      renderDefaultHeight = frozen.defaultHeight;
+    } else {
+      renderHeights = saved.unravelHeights;
+      renderDefaultHeight = saved.unravelHeight ?? defaultHeight;
+    }
 
     render3d(ctx, canvas, w, h, dpr, geom, {
       marginPx: THUMB_MARGIN_PX,
       camera,
-      // Global default height for every wall (per-edge overrides applied below).
-      height: defaultHeight,
-      // Per-edge heights: live ones while active, the frozen set once inactive;
-      // undefined => uniform default height.
+      // Global default height for walls without a per-edge override.
+      height: renderDefaultHeight,
+      // Per-edge heights matched to the rendered geometry (live / frozen / stored).
       heights: renderHeights,
       // Hover-link: the matching edge — as a footprint LINE (perimeter-mode hover)
       // or a filled wall PANEL (unravel-mode hover).
       highlightEdge,
       highlightAsLine,
     });
-  }, [saved.perimeter, livePerimeter, highlightEdge, highlightAsLine, heights, defaultHeight, camera]);
+  }, [saved.perimeter, saved.unravelHeights, saved.unravelHeight, livePerimeter, highlightEdge, highlightAsLine, heights, defaultHeight, camera]);
 
   const commitRename = () => {
     const name = draft.trim();

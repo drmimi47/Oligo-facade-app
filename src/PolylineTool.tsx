@@ -30,6 +30,7 @@ import {
   moveVertex,
   insertVertexOnSegment,
   deleteVertex,
+  eraseElements,
   popVertex,
   setHandle,
   makeSegmentArc,
@@ -206,6 +207,54 @@ interface DocSnapshot {
   floorPlates: number[];
 }
 
+/**
+ * Eye / eye-off visibility toggle embedded in the RIGHT edge of a tool button's
+ * rectangle (Floor Lines · Centerlines · Framing). Rendered as a sibling that overlays
+ * the button's right portion (the host wrapper is position:relative), so clicking it
+ * toggles only the corresponding element's on-canvas visibility — never the button's
+ * main action. `disabled` mirrors the parent button so the icon greys out in lockstep.
+ */
+function VisToggle({
+  visible,
+  disabled,
+  onToggle,
+  label,
+}: {
+  visible: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="vis-toggle"
+      // Sibling, not nested — but stop propagation anyway so a click never bubbles to
+      // the cluster's outside-press handlers that dismiss menus.
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      disabled={disabled}
+      aria-pressed={!visible}
+      aria-label={`${visible ? "Hide" : "Show"} ${label}`}
+      title={`${visible ? "Hide" : "Show"} ${label}`}
+    >
+      {visible ? (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      ) : (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+          <line x1="1" y1="1" x2="23" y2="23" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 export default function PolylineTool() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -352,6 +401,20 @@ export default function PolylineTool() {
   // Eraser DRAG COLLECTED: the set of lines accumulated during an active click-drag
   // stroke, committed as one undo step on pointer-up. Empty when not dragging.
   const [eraseDragCollected, setEraseDragCollected] = useState<EraseTarget[]>([]);
+  // Eraser VERTEX DRAG COLLECTED (perimeter view): the perimeter vertex INDICES the
+  // cursor has swept over during an active Erase stroke, highlighted in the delete
+  // colour and removed together as one undo step on pointer-up. Empty when not dragging.
+  const [eraseVertexCollected, setEraseVertexCollected] = useState<number[]>([]);
+  // Eraser EDGE HOVER (perimeter view): the index of the closed-perimeter EDGE the
+  // cursor is over (and not over a vertex), highlighted in the delete colour; a click
+  // removes that one segment and reopens the loop there (keeping both vertices). -1
+  // when not targeting an edge.
+  const [eraseEdge, setEraseEdge] = useState(-1);
+  // Eraser EDGE DRAG COLLECTED (perimeter view): the perimeter EDGE indices the cursor
+  // has swept over during an active Erase stroke, highlighted in the delete colour and
+  // removed together (with any vertices, plus orphaned vertices) as one undo step on
+  // pointer-up. Empty when not dragging.
+  const [eraseEdgeCollected, setEraseEdgeCollected] = useState<number[]>([]);
   // CELL VIEW MODE — a purely VISUAL display mode for the elevation/Panels view
   // (the "View" button, top-left next to Statistics). "normal" is the default look; "materialId"
   // tints every grid CELL by its geometric SHAPE (width × height) in a unique colour
@@ -373,6 +436,13 @@ export default function PolylineTool() {
   // MULLIONS tool armed? Only available once a CW Type is chosen. Mutually exclusive
   // with the rest of the bottom-left cluster.
   const [mullionsOn, setMullionsOn] = useState(false);
+  // TYPE tool armed? A SCAFFOLDED cluster tool (no canvas behaviour yet — see the
+  // "scaffold only" decision): it turns blue when armed and is mutually exclusive with
+  // the rest of the cluster, becoming available only once the focused panel carries at
+  // least one frame. Its eye icon toggles `typeVisible` (a wired no-op for now, to drive
+  // visibility once the feature renders something).
+  const [typeOn, setTypeOn] = useState(false);
+  const [typeVisible, setTypeVisible] = useState(true);
   // Per-edge mullion HALF-WIDTH offsets (feet), set by dragging a grid line with the
   // Mullions tool (Stick system). V = applied to every vertical grid line of a panel,
   // H = every horizontal one. Each grid line renders as a pair of faces at ±offset.
@@ -435,12 +505,19 @@ export default function PolylineTool() {
   // cursor's elevation; a left-click drops a plate there (click an existing plate
   // to remove it). Place as many as wanted. Esc / clicking the button disarms it.
   const [floorPlateMode, setFloorPlateMode] = useState(false);
-  // Is the "Floor Lines" submenu (Place / Show-Hide) open?
-  const [floorMenuOpen, setFloorMenuOpen] = useState(false);
-  // VISIBILITY of the floor lines — a view preference (NOT model data, so not persisted):
-  // false hides every floor line from the elevation view without deleting them. Toggled
-  // from the Floor Lines submenu's Show / Hide item.
+  // VISIBILITY of the floor lines / centerlines / framing — view preferences (NOT model
+  // data, so not persisted): false hides those elements from the elevation view without
+  // deleting them. Each is toggled by the eye icon embedded in its tool button (Floor
+  // Lines / Centerlines / Framing).
   const [floorLinesVisible, setFloorLinesVisible] = useState(true);
+  const [centerlinesVisible, setCenterlinesVisible] = useState(true);
+  const [framingVisible, setFramingVisible] = useState(true);
+  // VISIBILITY of the on-canvas DIMENSION text (panel width / per-column-row / cell
+  // dimension labels AND the per-panel height input fields) across the Elevations,
+  // Wall Border, and Cells tabs. Toggled ONLY by the Dim button's eye icon (the Dim
+  // button itself has no action yet); this is the SINGLE source of truth, so no view
+  // (Clean / Shadows) auto-hides dimensions. Visible by default.
+  const [dimensionsVisible, setDimensionsVisible] = useState(true);
 
   // --- ONBOARDING HINT ---
   // A first-run hint centered on the empty canvas ("Draw a perimeter to start or open a
@@ -463,6 +540,9 @@ export default function PolylineTool() {
   // explicit and predictable: the button toggles it, and a close button, an
   // outside click, or Escape dismisses it.
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // --- SMART SEARCH ---
+  const [searchQuery, setSearchQuery] = useState("");
 
   // --- SETTINGS POPUP ---
   // The gear button at the top-right of the nav header toggles a draggable Settings
@@ -495,7 +575,7 @@ export default function PolylineTool() {
   // Hide the left tool panel (Create / Location) to reclaim horizontal screen space
   // for the canvas. Toggled from the chevron at the left of the nav header; when
   // collapsed the panel's grid column shrinks to zero (see .app--panel-collapsed).
-  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [panelCollapsed, setPanelCollapsed] = useState(true);
 
   // --- STATISTICS DROPDOWN ---
   // The "Statistics" button (top of canvas, next to Redo) toggles a dropdown that
@@ -577,7 +657,8 @@ export default function PolylineTool() {
         cell: { x0: number; x1: number; y0: number; y1: number };
         all: boolean;
       }
-    | { kind: "erase"; collected: EraseTarget[]; last: Point };
+    | { kind: "erase"; collected: EraseTarget[]; last: Point }
+    | { kind: "eraseVertex"; collected: number[]; edges: number[]; last: Point };
   const dragRef = useRef<Drag | null>(null);
   // Timestamp (performance.now) of the last forward layer drill, so a rapid second
   // click (e.g. a habitual double-click) within DRILL_COOLDOWN_MS is ignored and one
@@ -1107,17 +1188,47 @@ export default function PolylineTool() {
     const keyOf = (c: { x0: number; x1: number; y0: number; y1: number }) =>
       `${Math.round((c.x1 - c.x0) / CELL_SHAPE_EPS)}x${Math.round((c.y1 - c.y0) / CELL_SHAPE_EPS)}`;
     const keys = new Set<string>();
+    // Per shape key, collect EVERY cell instance across all panels so identical cells
+    // can be given slightly different SHADES (a saturation taper) — matching the
+    // one-button-drawing Material-ID map, where same-shape panels share a hue/number
+    // but fan out in saturation. Each instance is identified by (edge, x0, y0).
+    const instances = new Map<string, Array<{ edge: number; x0: number; y0: number }>>();
     for (const seg of unravelResult?.segments ?? [])
-      for (const c of cellsForEdge(seg.index)) keys.add(keyOf(c));
+      for (const c of cellsForEdge(seg.index)) {
+        const k = keyOf(c);
+        keys.add(k);
+        const inst = { edge: seg.index, x0: c.x0, y0: c.y0 };
+        const arr = instances.get(k);
+        if (arr) arr.push(inst);
+        else instances.set(k, [inst]);
+      }
     const sorted = [...keys].sort((a, b) => {
       const [aw, ah] = a.split("x").map(Number);
       const [bw, bh] = b.split("x").map(Number);
       return aw - bw || ah - bh;
     });
     const index = new Map(sorted.map((k, i) => [k, i] as const));
+    // Deterministic RANK of each instance within its shape group (ordered by panel,
+    // then position) plus the group size — together they give each cell a shade
+    // fraction in [0,1] below. Sorting keeps shades stable as unrelated panels change.
+    const rank = new Map<string, number>();
+    const groupSize = new Map<string, number>();
+    for (const [k, arr] of instances) {
+      arr.sort((a, b) => a.edge - b.edge || a.y0 - b.y0 || a.x0 - b.x0);
+      groupSize.set(k, arr.length);
+      arr.forEach((inst, i) => rank.set(`${inst.edge}|${inst.x0}|${inst.y0}`, i));
+    }
     return {
       uniqueCount: sorted.length,
       indexOf: (c: { x0: number; x1: number; y0: number; y1: number }) => index.get(keyOf(c)) ?? 0,
+      // Shade FRACTION (0 → 1) of a cell instance within its shape group: 0 for the
+      // first instance, 1 for the last (single-instance groups → 0). Identical cells
+      // keep one hue/number but get a slightly different saturation across this range.
+      shadeOf: (edge: number, c: { x0: number; x1: number; y0: number; y1: number }) => {
+        const n = groupSize.get(keyOf(c)) ?? 1;
+        if (n <= 1) return 0;
+        return (rank.get(`${edge}|${c.x0}|${c.y0}`) ?? 0) / (n - 1);
+      },
       // Material-ID KEY of a cell (its shape bucket). Two cells with the same key are
       // the "same" cell — used both for the colour index above and for mirroring a
       // Unitized framing edit across every cell of that shape (see the cellframe commit).
@@ -1194,7 +1305,8 @@ export default function PolylineTool() {
           };
       }
       // MATERIAL-ID tint: one entry per cell carrying its SHAPE colour index (the
-      // renderer turns the index into a hue). Only built while the view is active.
+      // renderer turns the index into a hue) and its SHADE fraction (identical cells
+      // share the hue but fan out in saturation). Only built while the view is active.
       const cellColors: NonNullable<UnravelDraw["cellColors"]> | undefined = colorView
         ? cells.map((c) => ({
             x0: c.x0,
@@ -1202,6 +1314,7 @@ export default function PolylineTool() {
             y0: c.y0,
             y1: c.y1,
             colorIndex: cellShapeColors.indexOf(c),
+            shade: cellShapeColors.shadeOf(edge, c),
           }))
         : undefined;
       // ORIENTATION HEATMAP: tint each cell by its panel's facing direction (heat
@@ -1311,7 +1424,6 @@ export default function PolylineTool() {
   const closeAllMenus = useCallback(() => {
     setCwMenuOpen(false);
     setViewMenuOpen(false);
-    setFloorMenuOpen(false);
     setStatsMenuOpen(false);
   }, []);
 
@@ -1326,11 +1438,15 @@ export default function PolylineTool() {
     setDivideDraft(null);
     setEraserOn(false);
     setEraseHover(null);
+    setEraseVertexCollected([]);
+    setEraseEdgeCollected([]);
+    setEraseEdge(-1);
     setMullionsOn(false);
     setMullionHover(null);
     setMullionDraft(null);
     setCellEdgeHover(null);
     setCellFrameDraft(null);
+    setTypeOn(false);
   }, []);
 
   // --- CW TYPE (curtain-wall system) + MULLIONS ---
@@ -1341,7 +1457,6 @@ export default function PolylineTool() {
   const onCwType = useCallback(() => {
     setCwMenuOpen((open) => !open);
     setViewMenuOpen(false);
-    setFloorMenuOpen(false);
     setStatsMenuOpen(false);
     disarmClusterTools();
   }, [disarmClusterTools]);
@@ -1422,6 +1537,9 @@ export default function PolylineTool() {
   // intentional TODO stub — wired so the gated button exists and has a clear home.
   const onMullions = useCallback(() => {
     if (cwType === null) return; // disabled in the UI, but guard anyway
+    // Arming a tool whose drawn elements are hidden makes no sense — restore visibility
+    // so the user always sees what they're editing (mirrors the Floor Lines button).
+    setFramingVisible(true);
     closeAllMenus();
     setFloorPlateMode(false);
     setSubtractiveOn(false);
@@ -1429,6 +1547,7 @@ export default function PolylineTool() {
     setDivideDraft(null);
     setEraserOn(false);
     setEraseHover(null);
+    setTypeOn(false);
     setMullionsOn((on) => {
       if (on) {
         // Toggling off: drop the hover highlight + any in-flight drag preview.
@@ -1440,6 +1559,31 @@ export default function PolylineTool() {
       return !on;
     });
   }, [cwType, closeAllMenus]);
+
+  // TYPE: a SCAFFOLDED cluster tool (no canvas behaviour yet). Becomes available only
+  // once the focused panel carries at least one frame (gated by `canType` in the UI).
+  // Mutually exclusive with every other cluster tool — arming it disarms the rest and
+  // drops their in-flight previews — and turns blue while armed like the others. The
+  // actual "type" assignment/render is an intentional TODO stub.
+  const onType = useCallback(() => {
+    if (focusedPanel === null) return; // disabled in the UI, but guard anyway
+    // Restore visibility on click so an armed tool's elements are always shown (mirrors
+    // the Floor Lines button).
+    setTypeVisible(true);
+    closeAllMenus();
+    setFloorPlateMode(false);
+    setSubtractiveOn(false);
+    setDivideHover(null);
+    setDivideDraft(null);
+    setEraserOn(false);
+    setEraseHover(null);
+    setMullionsOn(false);
+    setMullionHover(null);
+    setMullionDraft(null);
+    setCellEdgeHover(null);
+    setCellFrameDraft(null);
+    setTypeOn((on) => !on);
+  }, [focusedPanel, closeAllMenus]);
 
   /** Interior GRID-LINE positions of a panel (the lines the Mullions tool targets):
    *  vertical = equal-cell splits + Subtractive divisions (model x); horizontal =
@@ -1573,36 +1717,27 @@ export default function PolylineTool() {
         setMullionDraft(null);
         setCellEdgeHover(null);
         setCellFrameDraft(null);
+        setTypeOn(false);
       }
       return !on;
     });
   }, [closeAllMenus]);
-  // "Floor Lines" button — toggles its submenu (Place / Show-Hide).
-  const onFloorMenu = useCallback(() => {
-    setFloorMenuOpen((open) => !open);
-    setCwMenuOpen(false);
-    setViewMenuOpen(false);
-    setStatsMenuOpen(false);
-    disarmClusterTools();
-  }, [disarmClusterTools]);
-  // Submenu "Place": arm/disarm the placement tool. Closes the menu, and ensures floor
-  // lines are VISIBLE (placing lines you can't see makes no sense).
+  // "Floor Lines" button — arm/disarm the placement tool directly (single-function
+  // button, no submenu). onFloorPlate already closes the other menus and enforces
+  // cluster mutual-exclusion; we also ensure floor lines are VISIBLE (placing lines you
+  // can't see makes no sense).
   const onFloorPlace = useCallback(() => {
-    setFloorMenuOpen(false);
     setFloorLinesVisible(true);
     onFloorPlate();
   }, [onFloorPlate]);
-  // Submenu "Show / Hide": flip floor-line visibility (closes the menu).
-  const toggleFloorLines = useCallback(() => {
-    setFloorLinesVisible((v) => !v);
-    setFloorMenuOpen(false);
-  }, []);
-
   // SUBTRACTIVE: arm the panel-division tool for the selected panel. Toggling it
   // off (or deselecting / Esc) clears any in-flight preview. The actual placement
   // happens in the pointer handlers (hover preview + click/drag commit).
   const onSubtractive = useCallback(() => {
     if (focusedPanel === null) return; // disabled in the UI, but guard anyway
+    // Restore visibility on click so the centerlines are always shown while editing them
+    // (mirrors the Floor Lines button).
+    setCenterlinesVisible(true);
     closeAllMenus();
     // Mutually exclusive with the rest of the cluster: arming Subtractive disarms
     // the Floor plate tool and the Eraser and drops their previews (clicking
@@ -1616,6 +1751,7 @@ export default function PolylineTool() {
     setMullionDraft(null);
     setCellEdgeHover(null);
     setCellFrameDraft(null);
+    setTypeOn(false);
     setSubtractiveOn((on) => {
       if (on) {
         setDivideHover(null);
@@ -1643,8 +1779,17 @@ export default function PolylineTool() {
     setMullionDraft(null);
     setCellEdgeHover(null);
     setCellFrameDraft(null);
+    setTypeOn(false);
     setEraserOn((on) => {
-      if (on) setEraseHover(null);
+      // Disarming drops the unravel line highlight AND the perimeter vertex
+      // hover (in Draw mode the move handler won't reset it otherwise).
+      if (on) {
+        setEraseHover(null);
+        setHoveredVertex(-1);
+        setEraseVertexCollected([]);
+        setEraseEdgeCollected([]);
+        setEraseEdge(-1);
+      }
       return !on;
     });
   }, [closeAllMenus]);
@@ -1658,7 +1803,6 @@ export default function PolylineTool() {
   const onViewMenu = useCallback(() => {
     setViewMenuOpen((open) => !open);
     setCwMenuOpen(false);
-    setFloorMenuOpen(false);
     setStatsMenuOpen(false);
     disarmClusterTools();
   }, [disarmClusterTools]);
@@ -1766,6 +1910,63 @@ export default function PolylineTool() {
       return result;
     },
     [viewport, eraseTargetsNear],
+  );
+
+  /** Collect EVERY perimeter VERTEX the cursor sweeps over moving from `a` to `b`, so
+   *  the Erase drag never skips a vertex between two sampled pointer events. Samples the
+   *  path at ~half the hit tolerance and unions any vertex within tolerance into
+   *  `collected` (deduped by index). Indices stay valid through the drag because the
+   *  perimeter is only mutated on the pointer-up commit. Returns the (possibly
+   *  unchanged) array. */
+  const collectVerticesAlong = useCallback(
+    (a: Point, b: Point, collected: number[]): number[] => {
+      const tolModel = pixelsToModel(viewport, HIT_TOLERANCE_PX);
+      const seen = new Set(collected);
+      const result = [...collected];
+      const stepModel = Math.max(pixelsToModel(viewport, HIT_TOLERANCE_PX / 2), 1e-6);
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(1, Math.ceil(dist / stepModel));
+      for (let s = 0; s <= steps; s++) {
+        const u = s / steps;
+        const p = { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
+        const vi = hitVertex(perimeter, p, tolModel);
+        if (vi >= 0 && !seen.has(vi)) {
+          seen.add(vi);
+          result.push(vi);
+        }
+      }
+      return result;
+    },
+    [viewport, perimeter],
+  );
+
+  /** Collect every perimeter EDGE the cursor sweeps over moving from `a` to `b`, so a
+   *  fast Erase drag never skips a segment between two sampled pointer events. Mirrors
+   *  collectVerticesAlong but hit-tests segments (hitSegment). Works on both open and
+   *  closed perimeters. Indices stay valid through the drag (the perimeter is mutated
+   *  only on the commit). */
+  const collectEdgesAlong = useCallback(
+    (a: Point, b: Point, collected: number[]): number[] => {
+      const tolModel = pixelsToModel(viewport, HIT_TOLERANCE_PX);
+      const seen = new Set(collected);
+      const result = [...collected];
+      const stepModel = Math.max(pixelsToModel(viewport, HIT_TOLERANCE_PX / 2), 1e-6);
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(1, Math.ceil(dist / stepModel));
+      for (let s = 0; s <= steps; s++) {
+        const u = s / steps;
+        const p = { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
+        // Vertices win over edges: don't collect an edge where a corner is the target.
+        if (hitVertex(perimeter, p, tolModel) >= 0) continue;
+        const seg = hitSegment(perimeter, p, tolModel);
+        if (seg && !seen.has(seg.index)) {
+          seen.add(seg.index);
+          result.push(seg.index);
+        }
+      }
+      return result;
+    },
+    [viewport, perimeter],
   );
 
   /** Reset a panel's framing (mullion) offset for one axis to none, so newly added
@@ -1932,11 +2133,10 @@ export default function PolylineTool() {
       // so it doesn't fight their input.
       cancelAnim();
 
-      // Any press on the canvas dismisses an open Statistics / CW Type / View / Floor Lines menu.
+      // Any press on the canvas dismisses an open Statistics / CW Type / View menu.
       if (statsMenuOpen) setStatsMenuOpen(false);
       if (cwMenuOpen) setCwMenuOpen(false);
       if (viewMenuOpen) setViewMenuOpen(false);
-      if (floorMenuOpen) setFloorMenuOpen(false);
 
       // FLOOR PLATE tool: while armed, a left-click drops a horizontal level line
       // at the cursor's elevation (or removes one already there). Takes precedence
@@ -1985,8 +2185,10 @@ export default function PolylineTool() {
         // recommendation previews (N equal-width columns chosen by the cursor's
         // position). Owns the click — no height resize or deselect happens.
         if (subtractiveOn && focusedPanel !== null) {
-          const seg = unravelResult?.segments.find((s) => s.index === focusedPanel);
-          if (seg && hitUnravelPanel(mu) === focusedPanel) {
+          const clickedEdge = hitUnravelPanel(mu);
+          // A press on the SELECTED panel commits the equal split.
+          const seg = clickedEdge === focusedPanel ? unravelResult?.segments.find((s) => s.index === focusedPanel) : undefined;
+          if (seg) {
             beginHistory(); // pushed on commit (pointer-up)
             dragRef.current = { kind: "divide", edge: focusedPanel };
             setDivideHover(null);
@@ -1999,6 +2201,16 @@ export default function PolylineTool() {
               setDivideDraft({ edge: focusedPanel, axis: "h", lines: buildEqualRows(mu.y, 0, panelH, floorPlates) });
             } else {
               setDivideDraft({ edge: focusedPanel, axis: "v", lines: buildEqualColumns(mu.x, seg.x0, seg.x1) });
+            }
+          } else if (clickedEdge >= 0 && clickedEdge !== focusedPanel) {
+            // QoL: a press on a DIFFERENT wall border reframes to it with the tool
+            // STILL armed — the user can pan/zoom to another border and keep editing
+            // without disarming, reselecting the border, and re-arming. Debounced like
+            // the layer-nav drill so a habitual double-click jumps only once.
+            const now = performance.now();
+            if (now - lastDrillRef.current >= DRILL_COOLDOWN_MS) {
+              lastDrillRef.current = now;
+              zoomToPanel(clickedEdge);
             }
           }
           return; // armed tool consumes the press regardless of where it landed
@@ -2028,6 +2240,18 @@ export default function PolylineTool() {
             dragRef.current = { kind: "mullion", edge: focusedPanel, axis: hit.axis, ref: hit.coord };
             const cur = (hit.axis === "v" ? panelMullionsV : panelMullionsH)[focusedPanel] ?? 0;
             setMullionDraft({ edge: focusedPanel, axis: hit.axis, offset: cur });
+          } else {
+            // QoL: not near a grid line of THIS panel — a press on a DIFFERENT wall
+            // border reframes to it with the Framing tool STILL armed, so the user can
+            // move between borders and keep editing without disarming/reselecting.
+            const clickedEdge = hitUnravelPanel(mu);
+            if (clickedEdge >= 0 && clickedEdge !== focusedPanel) {
+              const now = performance.now();
+              if (now - lastDrillRef.current >= DRILL_COOLDOWN_MS) {
+                lastDrillRef.current = now;
+                zoomToPanel(clickedEdge);
+              }
+            }
           }
           return; // armed tool consumes the press regardless of where it landed
         }
@@ -2057,6 +2281,18 @@ export default function PolylineTool() {
               offset: startOffset,
               all,
             });
+          } else {
+            // QoL: not near a cell edge of THIS panel — a press on a DIFFERENT wall
+            // border reframes to it with the Framing tool STILL armed, so the user can
+            // move between borders and keep editing without disarming/reselecting.
+            const clickedEdge = hitUnravelPanel(mu);
+            if (clickedEdge >= 0 && clickedEdge !== focusedPanel) {
+              const now = performance.now();
+              if (now - lastDrillRef.current >= DRILL_COOLDOWN_MS) {
+                lastDrillRef.current = now;
+                zoomToPanel(clickedEdge);
+              }
+            }
           }
           return; // armed tool consumes the press regardless of where it landed
         }
@@ -2146,6 +2382,32 @@ export default function PolylineTool() {
       const m = eventToModel(e);
       const tolModel = pixelsToModel(viewport, HIT_TOLERANCE_PX);
 
+      // ERASE tool (perimeter view): start a drag stroke that collects every vertex AND
+      // every edge the cursor sweeps over; a plain click collects just the one under the
+      // press. The whole set is removed as one undo step on pointer-up — vertices spliced
+      // out, edges opened, and any vertex orphaned by losing both its edges auto-dropped
+      // (see eraseElements). Vertices win over edges under the cursor (corners delete the
+      // vertex). Works on both open and closed perimeters, in both Draw and Edit mode.
+      // Owns the press, so a click on empty canvas neither places nor selects.
+      if (eraserOn) {
+        // Hit-test against the RAW cursor (no grid snap) so vertices/edges catch exactly.
+        const mr = toModel(viewport, sx, sy);
+        const vi = hitVertex(perimeter, mr, tolModel);
+        const initialV = vi >= 0 ? [vi] : [];
+        // No vertex under the press but a segment is under the cursor → seed the edge set.
+        const seg = vi < 0 ? hitSegment(perimeter, mr, tolModel) : null;
+        const initialE = seg ? [seg.index] : [];
+        dragRef.current = { kind: "eraseVertex", collected: initialV, edges: initialE, last: mr };
+        setEraseVertexCollected(initialV);
+        setEraseEdgeCollected(initialE);
+        setEraseEdge(-1);
+        setSelectedVertex(-1);
+        setHoveredVertex(-1);
+        setInsertPreview(null);
+        canvasRef.current?.setPointerCapture(e.pointerId);
+        return;
+      }
+
       if (drawing) {
         // A pointer placement supersedes any in-progress typed dimension.
         setDimInput(null);
@@ -2234,7 +2496,6 @@ export default function PolylineTool() {
       statsMenuOpen,
       cwMenuOpen,
       viewMenuOpen,
-      floorMenuOpen,
       recordHistory,
       beginHistory,
       // Subtractive division tool reads these; without them the handler would keep
@@ -2389,6 +2650,22 @@ export default function PolylineTool() {
         setActiveDrawHandle(drag.index);
         const offset = { x: m.x - drag.anchor.x, y: m.y - drag.anchor.y };
         setPerimeter((p) => setHandle(p, drag.index, "out", offset, true));
+        return;
+      }
+
+      // ERASE VERTEX drag (perimeter view): accumulate every vertex the cursor SWEEPS
+      // over (sampling the whole path from the last point to this one) so a fast drag
+      // never skips a vertex between two pointer events. Uses the RAW cursor for the
+      // same precision reason as the unravel line eraser. Deleted as one undo step on up.
+      if (drag?.kind === "eraseVertex") {
+        const mr = toModel(viewport, sx, sy);
+        const beforeV = drag.collected.length;
+        const beforeE = drag.edges.length;
+        drag.collected = collectVerticesAlong(drag.last, mr, drag.collected);
+        drag.edges = collectEdgesAlong(drag.last, mr, drag.edges);
+        drag.last = mr;
+        if (drag.collected.length !== beforeV) setEraseVertexCollected([...drag.collected]);
+        if (drag.edges.length !== beforeE) setEraseEdgeCollected([...drag.edges]);
         return;
       }
 
@@ -2554,12 +2831,20 @@ export default function PolylineTool() {
         return;
       }
 
-      // Hover feedback (edit mode only; not in the read-only unravel view).
-      if (mode === "edit" && !unravelOn) {
+      // Hover feedback (edit mode, OR while the Erase tool is armed; not in the
+      // read-only unravel view). The Erase tool lights the hovered vertex (drawn red)
+      // for deletion; failing a vertex it lights the hovered EDGE of a closed loop
+      // (also red) — a click there removes that segment, reopening the perimeter.
+      if (!unravelOn && (mode === "edit" || eraserOn)) {
         const tolModel = pixelsToModel(viewport, HIT_TOLERANCE_PX);
         const vi = hitVertex(perimeter, m, tolModel);
         setHoveredVertex(vi);
-        if (vi < 0) {
+        if (eraserOn) {
+          setInsertPreview(null);
+          setHoveredEdge(-1);
+          // Vertex wins over edge; when no vertex is hovered, target the nearest segment.
+          setEraseEdge(vi < 0 ? (hitSegment(perimeter, m, tolModel)?.index ?? -1) : -1);
+        } else if (vi < 0) {
           const seg = hitSegment(perimeter, m, tolModel);
           setInsertPreview(seg ? seg.point : null);
           // Link the hovered footprint edge to its line on the active thumbnail.
@@ -2592,6 +2877,9 @@ export default function PolylineTool() {
       eraserOn,
       nearestEraseLine,
       collectEraseAlong,
+      // Erase drag (perimeter view) sweeps up every vertex AND edge crossed.
+      collectVerticesAlong,
+      collectEdgesAlong,
       // Shift flips the drag axis; effectiveHeight resolves the panel height for the
       // equal-row generator; divideDraft.axis pins the axis chosen at press time.
       shiftHeld,
@@ -2644,6 +2932,24 @@ export default function PolylineTool() {
         setEraseDragCollected([]);
         setEraseHover(null);
       }
+      // Erase drag (perimeter view): remove every vertex AND edge swept during the
+      // stroke in one undo step. eraseElements splices the vertices, opens the edges,
+      // and auto-drops any vertex orphaned by losing both its walls (so no point is
+      // left alone); a closed loop reopens when an edge is cut or it falls below 3.
+      if (drag?.kind === "eraseVertex") {
+        if (drag.collected.length > 0 || drag.edges.length > 0) {
+          recordHistory();
+          const edges = drag.edges;
+          const verts = drag.collected;
+          setPerimeter((p) => eraseElements(p, edges, verts));
+          setSelectedVertex(-1);
+          setHoveredVertex(-1);
+          setInsertPreview(null);
+        }
+        setEraseVertexCollected([]);
+        setEraseEdgeCollected([]);
+        setEraseEdge(-1);
+      }
       // Mullion drag: commit the dragged half-width offset onto the panel/axis (one
       // undo step via the pre-drag snapshot taken on pointer-down), then drop the draft.
       if (drag?.kind === "mullion" && mullionDraft && mullionDraft.edge === drag.edge) {
@@ -2686,7 +2992,7 @@ export default function PolylineTool() {
       dragRef.current = null;
       setActiveDrawHandle(-1);
     },
-    [curveType, unravelResult, divideDraft, commitDivisions, commitDividersH, commitEraseLines, mullionDraft, cellFrameDraft, cellShapeColors, cellsForEdge, flushHistory],
+    [curveType, unravelResult, divideDraft, commitDivisions, commitDividersH, commitEraseLines, mullionDraft, cellFrameDraft, cellShapeColors, cellsForEdge, flushHistory, recordHistory],
   );
 
   const onDoubleClick = useCallback(
@@ -2827,8 +3133,8 @@ export default function PolylineTool() {
     setMullionDraft(null);
     setCellEdgeHover(null);
     setCellFrameDraft(null);
+    setTypeOn(false);
     setFloorPlateMode(false);
-    setFloorMenuOpen(false);
     setFloorLinesVisible(true);
     setCwMenuOpen(false);
     setViewMenuOpen(false);
@@ -3083,6 +3389,35 @@ export default function PolylineTool() {
         return;
       }
 
+      // ARROW KEYS — when already zoomed into a wall border (Panels phase: a panel is
+      // focused but not drilled into a cell), Left / Right jump to the PREVIOUS / NEXT
+      // border along the unravel strip, wrapping around the closed loop. This is a
+      // keyboard shortcut for the same gesture as clicking the neighbouring panel, so it
+      // routes through zoomToPanel — identical animated zoom, focus, and cell-clear.
+      if (
+        !typing &&
+        (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+        unravelOn &&
+        focusedPanel !== null &&
+        focusedCell === null
+      ) {
+        const segs = unravelResult?.segments;
+        if (segs && segs.length > 1) {
+          const pos = segs.findIndex((s) => s.index === focusedPanel);
+          if (pos >= 0) {
+            e.preventDefault();
+            const dir = e.key === "ArrowRight" ? 1 : -1;
+            const next = segs[(pos + dir + segs.length) % segs.length];
+            zoomToPanel(next.index);
+            // Drop any stale strip-hover so the minimap's wall highlight falls back to
+            // the newly FOCUSED border (lit red, as if moused over) until the pointer
+            // moves and resumes driving the hover itself.
+            setHoveredUnravelEdge(-1);
+            return;
+          }
+        }
+      }
+
       // REVIT-STYLE DIMENSION ENTRY (perimeter draw). Active once at least one vertex
       // is down: typing digits / "." builds the next segment's exact length, Enter
       // commits the vertex at that length in the cursor's direction, Backspace edits,
@@ -3160,11 +3495,6 @@ export default function PolylineTool() {
           (document.activeElement as HTMLElement)?.blur?.();
           return;
         }
-        if (floorMenuOpen) {
-          setFloorMenuOpen(false);
-          (document.activeElement as HTMLElement)?.blur?.();
-          return;
-        }
         if (cwMenuOpen) {
           setCwMenuOpen(false);
           (document.activeElement as HTMLElement)?.blur?.();
@@ -3176,6 +3506,12 @@ export default function PolylineTool() {
           setMullionDraft(null);
           setCellEdgeHover(null);
           setCellFrameDraft(null);
+          (document.activeElement as HTMLElement)?.blur?.();
+          return;
+        }
+        // Esc disarms the (scaffolded) Type tool.
+        if (typeOn) {
+          setTypeOn(false);
           (document.activeElement as HTMLElement)?.blur?.();
           return;
         }
@@ -3194,6 +3530,10 @@ export default function PolylineTool() {
           setEraserOn(false);
           setEraseHover(null);
           setEraseDragCollected([]);
+          setHoveredVertex(-1); // drop the perimeter vertex delete-highlight too
+          setEraseVertexCollected([]); // and any in-progress vertex sweep
+          setEraseEdgeCollected([]); // and any in-progress edge sweep
+          setEraseEdge(-1);
           dragRef.current = null;
           (document.activeElement as HTMLElement)?.blur?.();
           return;
@@ -3262,10 +3602,11 @@ export default function PolylineTool() {
     statsMenuOpen,
     cwMenuOpen,
     viewMenuOpen,
-    floorMenuOpen,
     mullionsOn,
+    typeOn,
     focusedPanel,
     focusedCell,
+    unravelResult,
     zoomToPanel,
     fitUnravel,
     unravelGap,
@@ -3299,6 +3640,7 @@ export default function PolylineTool() {
     setMullionDraft(null);
     setEraserOn(false);
     setEraseHover(null);
+    setTypeOn(false);
   }, [cwType]);
 
   // A typed dimension only makes sense mid-draw; drop any leftover entry as soon as
@@ -3497,6 +3839,27 @@ export default function PolylineTool() {
       }
     }
 
+    // Erase tool (perimeter view): the edges flagged for removal (hover + drag-collected,
+    // deduped) and the vertices flagged for deletion — those explicitly swept up PLUS any
+    // that the targeted edges would orphan (both incident walls gone), previewed in red so
+    // the auto-drop is visible before release. Both empty outside the armed perimeter view.
+    let eraseEdges: number[] = [];
+    let erasePreviewVertices = eraseVertexCollected;
+    if (eraserOn && !unravelOn) {
+      const edgeSet = new Set(eraseEdgeCollected);
+      if (eraseEdge >= 0) edgeSet.add(eraseEdge);
+      eraseEdges = [...edgeSet];
+      const n = perimeter.vertices.length;
+      if (perimeter.closed && n > 0 && edgeSet.size > 0) {
+        // Vertex i sits between edge (i-1+n)%n and edge i; both gone → it is orphaned.
+        const vset = new Set(eraseVertexCollected);
+        for (let i = 0; i < n; i++) {
+          if (edgeSet.has((i - 1 + n) % n) && edgeSet.has(i)) vset.add(i);
+        }
+        erasePreviewVertices = [...vset];
+      }
+    }
+
     // Cell tint highlight. In the PANELS phase it follows the HOVERED cell (resolve
     // the hovered index back to its model rect). Once a cell is clicked into (ASSEMBLY,
     // focusedCell set) the SELECTED cell stays tinted — so the zoomed-in cell still
@@ -3525,6 +3888,15 @@ export default function PolylineTool() {
       dimText: dimInput,
       selectedVertex,
       hoveredVertex,
+      // Erase tool armed in the perimeter view → draw the hovered vertex in the
+      // delete colour so it reads as "click to remove".
+      eraseVertexArmed: eraserOn && !unravelOn,
+      // Vertices flagged for deletion during an Erase stroke — swept up plus any the
+      // collected edges would orphan — previewed in the delete colour (see above).
+      eraseVertices: erasePreviewVertices,
+      // Erase tool: the perimeter edges flagged for removal (hover + drag-collected),
+      // each drawn in the delete colour so the user sees which segments a release removes.
+      eraseEdges,
       // Show handles for the vertex being curve-edited: the selected one in edit
       // mode, or the one whose handle is being pulled while drawing.
       handleVertex: mode === "edit" ? selectedVertex : activeDrawHandle,
@@ -3558,8 +3930,15 @@ export default function PolylineTool() {
       focusedCellEdge: unravelOn && focusedCell !== null ? hoveredCellEdge : null,
       floorPlates,
       // Floor Lines "Hide" — suppress drawing every floor line (and its label / eraser
-      // highlight) without deleting them. A view preference from the Floor Lines submenu.
+      // highlight) without deleting them. A view preference from the Floor Lines eye icon.
       floorPlatesHidden: !floorLinesVisible,
+      // Centerlines / Framing "Hide" — same view preference, toggled by the eye icon on
+      // each tool button; suppresses drawing those elements without deleting them.
+      centerlinesHidden: !centerlinesVisible,
+      framingHidden: !framingVisible,
+      // Dim "Hide" — the Dim button (and its eye) is the single source of truth for the
+      // on-canvas dimension labels; no view auto-hides them.
+      dimensionsHidden: !dimensionsVisible,
       // Ghosted preview line follows the cursor's elevation while the tool is
       // armed, run through the SAME snap helper as placement so the ghost line
       // (and its elevation label) sits exactly where a click would drop the plate
@@ -3570,8 +3949,9 @@ export default function PolylineTool() {
       // Eraser deletion highlights — panel division lines and floor plates (computed above).
       eraseHighlight,
       eraseFloorPlates,
-      // CLEAN view: white panel fill; centerlines and dimensions hidden. (Floor lines are
-      // NOT auto-hidden — their visibility is controlled by floorPlatesHidden above.)
+      // CLEAN view: white panel fill; only the DIMENSION labels are hidden. Floor lines,
+      // centerlines, and framing are NEVER auto-hidden by any view — they follow only their
+      // per-button eye icons (floorPlatesHidden / centerlinesHidden / framingHidden above).
       cellClean: cellViewMode === "clean",
       // SHADOWS view: clean white glass PLUS raised-frame hard drop shadows (2.5D).
       cellShadows: cellViewMode === "shadows",
@@ -3603,6 +3983,9 @@ export default function PolylineTool() {
     floorPlates,
     floorPlateMode,
     floorLinesVisible,
+    centerlinesVisible,
+    framingVisible,
+    dimensionsVisible,
     // Preview elevation is now run through snapFloorPlateY (reads floorPlates /
     // shiftHeld / viewport), so repaint when the snap result can change.
     snapFloorPlateY,
@@ -3618,11 +4001,14 @@ export default function PolylineTool() {
     eraserOn,
     eraseHover,
     eraseDragCollected,
+    eraseVertexCollected,
+    eraseEdge,
+    eraseEdgeCollected,
     panelDivisions,
     panelDividersH,
     floorPlates,
-    // Clean/Shadows views repaint the panels white and hide centerlines/dimensions
-    // (floor lines follow the Floor Lines submenu, not the view mode).
+    // Clean/Shadows views repaint the panels white (floor lines, centerlines, framing,
+    // and dimensions follow their per-button toggles, not the view mode).
     cellViewMode,
     // Repaint every on-canvas dimension label when the display unit changes (the
     // renderer's formatters read the active unit from core/units at paint time).
@@ -3729,15 +4115,6 @@ export default function PolylineTool() {
     Object.values(panelDivisions).some((a) => a.length > 0) ||
     Object.values(panelDividersH).some((a) => a.length > 0);
 
-  // Has the user PLACED any floor line? The ground datum (y ≈ 0, level 0) is a
-  // permanent, undeletable plate present in every unravel view, so it doesn't count
-  // — only floor lines ABOVE it are user-placed content.
-  const hasUserFloorLines = floorPlates.some((p) => Math.abs(p) > 1e-6);
-
-  // Eraser / Dim gate: editable only in the unravel view once the user has placed a
-  // centerline or a floor line (something there is to erase / dimension).
-  const canEraseOrDim = unravelOn && (hasAnyCenterlines || hasUserFloorLines);
-
   // Has ANY panel been assigned a curtain-wall type? `cwType` above only reflects the
   // FOCUSED panel, so when the user picks a CW Type with no panel focused (which
   // applies it to every panel) it stays null. This project-wide check drives the
@@ -3765,16 +4142,23 @@ export default function PolylineTool() {
     ((panelDivisions[focusedPanel]?.length ?? 0) > 0 ||
       (panelDividersH[focusedPanel]?.length ?? 0) > 0);
 
+  // Type gate: the (scaffolded) Type tool acts on a panel's FRAMES, so it becomes
+  // available only once the FOCUSED panel carries at least one frame — a Stick mullion
+  // offset (vertical OR horizontal) or any Unitized per-cell inset. With no frame there
+  // is nothing to type, so it stays disabled (which also keeps it disabled in the
+  // Building Perimeter tab, where no panel can be focused).
+  const canType =
+    focusedPanel !== null &&
+    ((panelMullionsV[focusedPanel] ?? 0) > 0 ||
+      (panelMullionsH[focusedPanel] ?? 0) > 0 ||
+      Object.values(panelCellFraming[focusedPanel] ?? {}).some(
+        (ins) => ins.top > 0 || ins.right > 0 || ins.bottom > 0 || ins.left > 0,
+      ));
+
   // AUTO-DISARM ON GATE LOSS: a tool that is armed (blue) must un-arm the moment its
-  // enablement condition goes false — e.g. erasing the last centerline/floor line
-  // disables the Eraser, which would otherwise stay blue but unclickable. Each effect
+  // enablement condition goes false — e.g. losing the focused panel disables the
+  // Centerlines tool, which would otherwise stay blue but unclickable. Each effect
   // mirrors clicking the tool off (drops the tool's in-flight previews too).
-  useEffect(() => {
-    if (!canEraseOrDim && eraserOn) {
-      setEraserOn(false);
-      setEraseHover(null);
-    }
-  }, [canEraseOrDim, eraserOn]);
   useEffect(() => {
     if (!canPlaceLines && floorPlateMode) setFloorPlateMode(false);
   }, [canPlaceLines, floorPlateMode]);
@@ -3794,12 +4178,41 @@ export default function PolylineTool() {
       setCellFrameDraft(null);
     }
   }, [canFrame, mullionsOn]);
+  useEffect(() => {
+    if (!canType && typeOn) setTypeOn(false);
+  }, [canType, typeOn]);
 
   // Is the current sketch SAVED (a saved project is loaded/active)? A brand-new sketch
   // has activeSavedId == null until "＋ Save current sketch" is used (see the auto-save
   // effect). The downstream tabs (Elevations / Wall Border / Cells) stay disabled until
   // then, so the user commits the footprint to a project before designing on top of it.
   const isSaved = activeSavedId !== null;
+
+  // CONTEXTUAL TOOL HINT — short red guidance shown right of the X/Y cursor
+  // readouts in the status bar, coaching new users on what the active tool does.
+  // Priority: armed bottom-cluster tools first (mutually exclusive), then the
+  // perimeter draw/edit fallback. Empty string ⇒ no hint shown. Keep each entry
+  // terse and action-first; wording mirrors the ControlsList ("?" help) so the two
+  // never disagree — update both together when a control changes.
+  const toolHint = subtractiveOn
+    ? "Move cursor to size the split · click to place · hold Shift for horizontal rows"
+    : mullionsOn
+    ? cwType === "unitized"
+      ? "Click-drag a cell edge to inset framing · hold Shift to inset all four edges"
+      : "Click-drag a grid line to set the mullion offset (both sides)"
+    : eraserOn
+    ? unravelOn
+      ? "Click a centerline or floor line to delete · drag across several to erase in one stroke"
+      : "Click a perimeter vertex to delete it · drag across several to erase in one stroke"
+    : floorPlateMode
+    ? "Click to place a floor line · hold Shift to bypass snapping"
+    : phase === "perimeter" && mode === "draw" && perimeter.vertices.length > 0
+    ? "Click to place vertices · click-drag to convert to arc · hold Shift to lock 15° · double-click or Enter to close"
+    : phase === "perimeter" && mode === "edit"
+    ? "Drag a vertex to move · drag a knob to curve · double-click a vertex for a corner"
+    : unravelOn && Object.keys(panelCwType).length === 0
+    ? "Assign a CW Type to start"
+    : "";
 
   return (
     <div className={`app ${panelCollapsed ? "app--panel-collapsed" : ""}`}>
@@ -3841,9 +4254,9 @@ export default function PolylineTool() {
             else { setFocusedCell(null); setFocusedPanel(null); fitUnravel(unravelGap, unravelHeights, unravelHeight); }
           }}
           disabled={!isSaved}
-          title="Elevations — unwrapped building perimeter"
+          title="Unroll Elevations — unwrapped building perimeter"
         >
-          Elevations
+          Unroll Elevations
         </button>
         <button
           className={`nav-header__btn ${phase === "panels" ? "is-active" : ""}`}
@@ -3903,8 +4316,21 @@ export default function PolylineTool() {
         >
           Cells
         </button>
-        {/* SETTINGS — gear button pinned to the far RIGHT of the header (top-right of
-            the app). Toggles the Settings popup (same chrome as the Solar Study popup). */}
+        {/* RIGHT GROUP — search bar + settings gear, pushed to the far right of the header. */}
+        <div className="nav-header__right">
+          <div className="nav-header__search-wrap">
+            <input
+              className="nav-header__search"
+              type="text"
+              placeholder="Smart search"
+              aria-label="Smart search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            <span className="nav-header__search-sizer" aria-hidden="true">
+              {searchQuery || "Smart search"}
+            </span>
+          </div>
         <button
           className={`nav-header__settings ${settingsOpen ? "is-active" : ""}`}
           onClick={() => setSettingsOpen((on) => !on)}
@@ -3928,34 +4354,16 @@ export default function PolylineTool() {
             <circle cx="12" cy="12" r="3" />
           </svg>
         </button>
+        </div>
       </header>
 
       {/* ===== LEFT: TOOL PANEL ===== */}
       <aside className="panel">
-        {/* CREATE — drawing tools: Mode (Draw/Edit), Segment (Line/Arc), and the
-            curve-handle hint, grouped under one titled section. */}
+        {/* CREATE — drawing tools: Segment (Line/Arc) and the curve-handle hint,
+            grouped under one titled section. The Draw/Edit MODE toggle lives in the
+            bottom-right tool cluster (with Eraser/Dim), not here. */}
         <section className="panel__section">
           <div className="panel__section-title">Create</div>
-          <div className="panel__row">
-            <span className="panel__label">Mode</span>
-            <div className="segmented">
-              <button
-                className={`segmented__btn ${mode === "draw" ? "is-active" : ""}`}
-                onClick={() => setMode("draw")}
-                disabled={perimeter.closed}
-                title="Place vertices"
-              >
-                Draw
-              </button>
-              <button
-                className={`segmented__btn ${mode === "edit" ? "is-active" : ""}`}
-                onClick={() => setMode("edit")}
-                title="Select / drag / insert / delete vertices"
-              >
-                Edit
-              </button>
-            </div>
-          </div>
 
           <div className="panel__row">
             <span className="panel__label">Segment</span>
@@ -4044,6 +4452,8 @@ export default function PolylineTool() {
               setDivideHover(null);
               // Drop the Eraser deletion highlight too.
               setEraseHover(null);
+              setHoveredVertex(-1);
+              setEraseEdge(-1);
             }}
             onDoubleClick={onDoubleClick}
           />
@@ -4123,7 +4533,6 @@ export default function PolylineTool() {
                   setStatsMenuOpen((on) => !on);
                   setCwMenuOpen(false);
                   setViewMenuOpen(false);
-                  setFloorMenuOpen(false);
                   disarmClusterTools();
                 }}
                 disabled={!unravelOn}
@@ -4253,43 +4662,29 @@ export default function PolylineTool() {
                 </div>
               )}
             </div>
-            {/* FLOOR LINES — opens a dropup submenu (▾, same chevron as Statistics).
-                The menu carries: PLACE (arms the placement tool — while active a ghosted
-                dotted horizontal line tracks the cursor and a click drops a floor line;
-                click an existing one to remove; Esc or re-pick disarms) and a VISIBILITY
-                TOGGLE (Show / Hide) that draws or hides all floor lines without deleting
-                them. Floor lines only RENDER in the unravel/elevation view, so the button
-                is DISABLED outside it. The button stays highlighted while Place is armed. */}
+            {/* FLOOR LINES — a single-function tool button (no submenu): click ARMS the
+                placement tool — while active a ghosted dotted horizontal line tracks the
+                cursor and a click drops a floor line; click an existing one to remove; Esc
+                or re-click disarms. The eye ICON embedded in the button's right edge toggles
+                VISIBILITY of all floor lines (draws / hides without deleting them). Floor
+                lines only RENDER in the unravel/elevation view, so the button — and its eye —
+                are DISABLED outside it. Stays highlighted while armed. */}
             <div className="floorlines-wrap">
               <button
-                className={`floorplate-btn ${floorPlateMode ? "is-active" : ""}`}
-                onClick={onFloorMenu}
+                className={`floorplate-btn has-vis ${floorPlateMode ? "is-active" : ""}`}
+                onClick={onFloorPlace}
                 disabled={!canPlaceLines}
-                aria-haspopup="true"
-                aria-expanded={floorMenuOpen}
-                title="Place / toggle visibility of all floor lines"
+                aria-pressed={floorPlateMode}
+                title="Place floor lines"
               >
-                Floor Lines ▾
+                Floor Lines
               </button>
-              {floorMenuOpen && (
-                <div className="cw-menu" role="menu">
-                  <button
-                    className={`cw-menu__btn ${floorPlateMode ? "is-active" : ""}`}
-                    role="menuitemcheckbox"
-                    aria-checked={floorPlateMode}
-                    onClick={onFloorPlace}
-                  >
-                    Place
-                  </button>
-                  <button
-                    className="cw-menu__btn"
-                    role="menuitem"
-                    onClick={toggleFloorLines}
-                  >
-                    {floorLinesVisible ? "Hide" : "Show"}
-                  </button>
-                </div>
-              )}
+              <VisToggle
+                visible={floorLinesVisible}
+                disabled={!canPlaceLines}
+                onToggle={() => setFloorLinesVisible((v) => !v)}
+                label="floor lines"
+              />
             </div>
             {/* CENTERLINES — operates on the panel SELECTED via click, so it is DISABLED
                 until a panel is selected (focusedPanel !== null). The armed cluster tools
@@ -4297,26 +4692,65 @@ export default function PolylineTool() {
                 arming one disarms the rest. Cluster order: CW Type · Floor plate ·
                 Centerlines · Framing (Eraser is bottom-right by the "?"; View is top-left
                 by Statistics). */}
-            <button
-              className={`subtractive-btn ${subtractiveOn ? "is-active" : ""}`}
-              onClick={onSubtractive}
-              disabled={!canPlaceCenterlines}
-              aria-pressed={subtractiveOn}
-              title="Place centerlines on selected wall border"
-            >
-              Centerlines
-            </button>
+            <div className="tool-vis-wrap">
+              <button
+                className={`subtractive-btn has-vis ${subtractiveOn ? "is-active" : ""}`}
+                onClick={onSubtractive}
+                disabled={!canPlaceCenterlines}
+                aria-pressed={subtractiveOn}
+                title="Place centerlines on selected wall border"
+              >
+                Centerlines
+              </button>
+              <VisToggle
+                visible={centerlinesVisible}
+                disabled={!canPlaceCenterlines}
+                onToggle={() => setCenterlinesVisible((v) => !v)}
+                label="centerlines"
+              />
+            </div>
             {/* FRAMING — disabled until a CW Type is selected; arms the mullion/framing
-                offset tool. Last in the cluster. Mutually exclusive cluster tool. */}
-            <button
-              className={`mullions-btn ${mullionsOn ? "is-active" : ""}`}
-              onClick={onMullions}
-              disabled={!canFrame}
-              aria-pressed={mullionsOn}
-              title="Set framing offset from centerlines"
-            >
-              Framing
-            </button>
+                offset tool. Last in the cluster. Mutually exclusive cluster tool. The eye
+                ICON embedded in its right edge toggles framing visibility on the canvas. */}
+            <div className="tool-vis-wrap">
+              <button
+                className={`mullions-btn has-vis ${mullionsOn ? "is-active" : ""}`}
+                onClick={onMullions}
+                disabled={!canFrame}
+                aria-pressed={mullionsOn}
+                title="Set framing offset from centerlines"
+              >
+                Framing
+              </button>
+              <VisToggle
+                visible={framingVisible}
+                disabled={!canFrame}
+                onToggle={() => setFramingVisible((v) => !v)}
+                label="framing"
+              />
+            </div>
+            {/* TYPE — to the right of Framing. A SCAFFOLDED cluster tool (no canvas
+                behaviour yet): enabled only when the focused wall border has at least one
+                frame, armed/blue like the other tools, and disabled in the Building
+                Perimeter tab (no panel focused there). Its eye icon toggles a wired no-op
+                visibility flag for now. */}
+            <div className="tool-vis-wrap">
+              <button
+                className={`type-btn has-vis ${typeOn ? "is-active" : ""}`}
+                onClick={onType}
+                disabled={!canType}
+                aria-pressed={typeOn}
+                title="Set the frame type for the selected wall border"
+              >
+                Type
+              </button>
+              <VisToggle
+                visible={typeVisible}
+                disabled={!canType}
+                onToggle={() => setTypeVisible((v) => !v)}
+                label="frame types"
+              />
+            </div>
           </div>
           {/* UNRAVEL · per-panel height inputs. A DOM overlay (NOT canvas-drawn) of
               one <input> per rectangle, positioned by converting each rectangle's
@@ -4325,10 +4759,10 @@ export default function PolylineTool() {
               on every pan/zoom/resize, so the inputs track the canvas. The container
               is pointer-transparent; only the inputs capture events, so canvas
               pan/zoom elsewhere is unaffected. Cleaned up automatically when leaving
-              the view (unravelDraws becomes null). The CLEAN and SHADOWS presentation
-              views hide these height inputs too — they are dimension fields, which those
-              views suppress. */}
-          {unravelOn && unravelDraws && unravelDraws.length > 0 && cellViewMode !== "clean" && cellViewMode !== "shadows" && (
+              the view (unravelDraws becomes null). These height inputs are dimension
+              fields, so they follow the DIM toggle (dimensionsVisible) — the single
+              source of truth — and are no longer auto-hidden by the Clean / Shadows views. */}
+          {unravelOn && unravelDraws && unravelDraws.length > 0 && dimensionsVisible && (
             <div className="unravel-overlay">
               {unravelDraws.map(({ seg, height }) => {
                 // PANELS phase: the focused panel is now dimensioned per ROW with
@@ -4455,11 +4889,13 @@ export default function PolylineTool() {
             showSave={!unravelOn}
             stageRef={wrapRef}
             // Hover-link: in the UNRAVEL view the hovered strip lights its matching
-            // wall PANEL; in PERIMETER (edit) mode the hovered footprint edge lights
-            // its matching edge LINE instead (highlightAsLine below). MiniWindow
-            // applies it to the active entry only, whose geometry matches the live
-            // shape.
-            highlightEdge={unravelOn ? hoveredUnravelEdge : mode === "edit" ? hoveredEdge : -1}
+            // wall PANEL; with nothing hovered it falls back to the FOCUSED border (the
+            // one zoomed into — kept lit so arrow-key navigation between borders shows
+            // the current focus on the minimap, as if moused over). In PERIMETER (edit)
+            // mode the hovered footprint edge lights its matching edge LINE instead
+            // (highlightAsLine below). MiniWindow applies it to the active entry only,
+            // whose geometry matches the live shape.
+            highlightEdge={unravelOn ? (hoveredUnravelEdge >= 0 ? hoveredUnravelEdge : focusedPanel ?? -1) : mode === "edit" ? hoveredEdge : -1}
             // Perimeter-mode highlight draws the edge as a LINE on the footprint,
             // not a filled wall panel (that panel fill is the unravel-mode behaviour).
             highlightAsLine={!unravelOn}
@@ -4490,29 +4926,73 @@ export default function PolylineTool() {
             unravelDraws={unravelDraws}
             stageRef={wrapRef}
           />
-          {/* ERASER button — floats at the BOTTOM-RIGHT, just LEFT of the "?" help
-              button (anchored in .canvas-wrap). Deletes division lines on the focused
-              panel AND floor plates. Enabled whenever the unravel view is open (floor
-              plates are global; no panel selection needed). While armed, hovering near a
-              division line or floor plate highlights it; a click removes it (one undo
-              step each). Mutually exclusive with Centerlines/Framing/Floor plate. */}
+          {/* BOTTOM-RIGHT TOOL CLUSTER — floats just LEFT of the "?" help button
+              (anchored in .canvas-wrap). Order: Draw · Edit · Erase · Dim.
+              • Draw / Edit are the perimeter MODE toggle (relocated here from the left
+                Create panel) — Draw places vertices, Edit selects/drags/inserts them.
+              • Erase works in BOTH views: in the building view it deletes the perimeter
+                VERTEX under the cursor (enabled once the first vertex exists); in the
+                unravel view it deletes division lines on the focused panel AND floor
+                plates. While armed, hovering highlights the target; a click removes it
+                (one undo step each). Mutually exclusive with Centerlines/Framing/Floor plate.
+              • Dim is a placeholder button (the word does nothing yet, stays white); only
+                its EYE icon toggles the on-canvas DIMENSION visibility (the single source
+                of truth, unravel views). Disabled in the Building Perimeter tab. */}
           <div className="bottomright-tools">
+            <button
+              className={`eraser-btn ${phase === "perimeter" && mode === "draw" && !eraserOn ? "is-active" : ""}`}
+              onClick={() => {
+                setMode("draw");
+                if (eraserOn) onEraser();
+              }}
+              disabled={phase !== "perimeter" || perimeter.closed}
+              aria-pressed={phase === "perimeter" && mode === "draw" && !eraserOn}
+              title="Draw — place vertices"
+            >
+              Draw
+            </button>
+            <button
+              className={`eraser-btn ${phase === "perimeter" && mode === "edit" && !eraserOn ? "is-active" : ""}`}
+              onClick={() => {
+                setMode("edit");
+                if (eraserOn) onEraser();
+              }}
+              disabled={phase !== "perimeter"}
+              aria-pressed={phase === "perimeter" && mode === "edit" && !eraserOn}
+              title="Edit — select / drag / insert / delete vertices"
+            >
+              Edit
+            </button>
             <button
               className={`eraser-btn ${eraserOn ? "is-active" : ""}`}
               onClick={onEraser}
-              disabled={!canEraseOrDim}
               aria-pressed={eraserOn}
-              title="Eraser"
+              title="Erase — delete perimeter vertices (building view) or centerlines / floor lines (unravel view)"
             >
-              Eraser
+              Erase
             </button>
-            <button
-              className="eraser-btn"
-              disabled={!canEraseOrDim}
-              title="Dimension"
-            >
-              Dim
-            </button>
+            {/* DIM — clicking the word does NOTHING yet (its tool action is undefined);
+                the button stays white. Only its EYE icon controls the on-canvas DIMENSION
+                visibility (panel width / per-column-row / cell labels + the height input
+                fields) across the Elevations, Wall Border, and Cells tabs — the single
+                source of truth, so no view (Clean / Shadows) auto-hides dimensions.
+                Dimensions are VISIBLE by default. Disabled in the Building Perimeter tab
+                (dimensions are an unravel-view overlay). */}
+            <div className="tool-vis-wrap">
+              <button
+                className="eraser-btn has-vis"
+                disabled={!unravelOn}
+                title="Dimensions — use the eye icon to show / hide"
+              >
+                Dim
+              </button>
+              <VisToggle
+                visible={dimensionsVisible}
+                disabled={!unravelOn}
+                onToggle={() => setDimensionsVisible((v) => !v)}
+                label="dimensions"
+              />
+            </div>
           </div>
           {/* HELP "?" button — floats at the BOTTOM-RIGHT of the canvas (anchored
               in .canvas-wrap like the floor-plate / history clusters). Toggles the
@@ -4584,6 +5064,9 @@ export default function PolylineTool() {
           <span className="statusbar__item">
             Y {cursorModel ? toDisplayLength(cursorModel.y).toFixed(3) : "—"}
           </span>
+          {/* Contextual tool hint (red) — coaches new users on the active tool.
+              See `toolHint` above for the per-tool text. */}
+          {toolHint && <span className="statusbar__hint">{toolHint}</span>}
           <span className="statusbar__spacer" />
           {/* Zoom is px per model FOOT; show px per active display unit (× feet-per-unit). */}
           <span className="statusbar__item">
@@ -4604,6 +5087,7 @@ export default function PolylineTool() {
 function ControlsList() {
   return (
     <ul className="help">
+      <li><b>Draw / Edit</b> (bottom-right cluster, left of <b>Erase</b> · <b>Dim</b>) toggle the perimeter mode — <b>Draw</b> places vertices (disabled once the perimeter is closed), <b>Edit</b> selects / drags / inserts / deletes them</li>
       <li><b>Click</b> place vertex</li>
       <li><b>Type a number</b> (after the first vertex) sets the next segment's exact <b>length</b> — the cursor aims the direction, the rubber band snaps to the typed length · <b>Enter</b> places the vertex at that length · <b>.</b> for decimals · <b>Backspace</b> edits · <b>Esc</b> cancels the entry · hold <b>Shift</b> to also lock the angle to 15°</li>
       <li><b>Click-drag</b> pull out curve handles</li>
@@ -4615,29 +5099,32 @@ function ControlsList() {
       <li><b>Crosshairs</b> light-grey guide lines track the cursor across the canvas once you've started a perimeter (drawing or editing its vertices)</li>
       <li><b>Edit:</b> drag vertex · drag knobs · Alt-drag curve · click segment to insert</li>
       <li><b>Double-click vertex</b> make corner</li>
-      <li><b>Shift-click a vertex</b> delete it (perimeter view)</li>
+      <li><b>Shift-click a vertex</b> delete it (perimeter view) · or arm <b>Erase</b> and click (or click-drag across) vertices to remove them (the targeted vertices turn red)</li>
       <li><b>Wheel / pinch</b> zoom (at cursor) · <b>Middle-drag / Right-drag</b> pan</li>
       <li><b>Ctrl+Z / Ctrl+Y</b> undo / redo (Ctrl+Shift+Z also redoes)</li>
       <li><b>Ctrl+S</b> save perimeter → mini-window (top-right)</li>
       <li><b>Statistics</b> (top, next to Redo) toggle a dropdown of live stats for the current view (perimeter, or unravel when in elevation) · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · Esc or re-click to close · stays open while you work</li>
-      <li><b>Elevations</b> (top tab) unravels the geometry — unrolls edges clockwise into equal-length strips · the <b>Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs stay disabled until the sketch is saved (<b>＋ Save current sketch</b> in the Projects panel)</li>
-      <li><b>Floor Lines</b> (bottom-left, unravel view) — enabled once the selected panel has a <b>CW Type</b> · <b>click</b> opens a submenu (chevron ▾) · <b>Place</b> arms the tool to drop horizontal level lines (click the canvas to add, click a line to remove; Esc to finish) · the <b>Show / Hide</b> toggle draws or hides all floor lines without deleting them · the ground <b>0′</b> line is permanent (always present, can't be deleted)</li>
+      <li><b>Unroll Elevations</b> (top tab) unravels the geometry — unrolls edges clockwise into equal-length strips · the <b>Unroll Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs stay disabled until the sketch is saved (<b>＋ Save current sketch</b> in the Projects panel)</li>
+      <li><b>Floor Lines</b> (bottom-left, unravel view) — enabled once the selected panel has a <b>CW Type</b> · <b>click</b> arms the tool to drop horizontal level lines (click the canvas to add, click a line to remove; Esc or re-click to finish) · the <b>eye icon</b> on the button's right edge shows / hides all floor lines without deleting them · the ground <b>0′</b> line is permanent (always present, can't be deleted)</li>
       <li><b>Floor-plate snap</b> after the first plate above ground, new plates snap to multiples of that floor-to-floor height · <b>Shift</b> bypasses the snap (free / grid placement)</li>
       <li><b>Unravel:</b> drag a panel top to resize</li>
-      <li><b>Layer navigation:</b> a <b>single click</b> on a panel/cell drills one layer DEEPER (Elevations → Wall Border → Cells) · <b>click a different panel</b> (while in Wall Border/Cells) switches focus straight to it · <b>click the empty canvas</b> to step one layer BACK (Cells → Wall Border → Elevations) · it stops at Elevations — use the <b>Building Perimeter</b> tab to return to the footprint · the top tabs jump directly to a layer · Esc also steps back one layer</li>
+      <li><b>Layer navigation:</b> a <b>single click</b> on a panel/cell drills one layer DEEPER (Unroll Elevations → Wall Border → Cells) · <b>click a different panel</b> (while in Wall Border/Cells) switches focus straight to it · <b>click the empty canvas</b> to step one layer BACK (Cells → Wall Border → Unroll Elevations) · it stops at Unroll Elevations — use the <b>Building Perimeter</b> tab to return to the footprint · the top tabs jump directly to a layer · Esc also steps back one layer</li>
       <li><b>Hover a cell</b> (Panels view, a split panel zoomed-in) highlights the individual grid cell under the cursor, showing the panel is subdivided into navigable cells</li>
       <li><b>Wall Border view</b> dimensions the focused panel's grid: a <b>width</b> label per column along the top, and a <b>height</b> label per row along the left (the panel's height field is hidden here — drag the top edge to resize)</li>
       <li><b>Cells</b> (top nav) jumps straight to the cells view — the top-left-most cell of the focused panel, or of the first panel with centerlines · enabled once the sketch is saved and <b>any</b> panel has centerlines (Centerlines tool), from any tab</li>
       <li><b>Click a cell</b> (Wall Border or Cells view) zooms into that grid cell, going one layer deeper</li>
       <li><b>Cells view</b> dimensions the selected cell on all four sides: a <b>width</b> label on the top and bottom edges, a <b>height</b> label on the left and right edges</li>
       <li><b>Hover an edge</b> (Assembly view) of the selected cell highlights that edge <b>red</b> (top / right / bottom / left, one at a time) to mark it as selected</li>
-      <li><b>Click a panel</b> (Elevations) selects + zooms it (its width/height labels turn grey) and enables the <b>CW Type</b> button (bottom-left cluster) — the only cluster button available until a type is assigned · click the empty canvas (or Esc) to step back out</li>
-      <li><b>CW Type</b> (first in the bottom-left cluster) assigns the curtain-wall system <b>per panel</b> — select a panel, then click (chevron ▾ marks the menu) to choose <b>Stick System</b> or <b>Unitized System</b> · the button shows the selected panel's "CW Type: <i>name</i>" · assigning a type <b>unlocks the rest of the row — Floor Lines, Centerlines, Framing — and the Eraser</b> (all stay disabled until a panel's CW Type is set) · a panel holds only ONE system, so switching its type <b>clears that panel's framing of the other system</b> (its centerlines are kept)</li>
-      <li><b>Framing</b> (last in the bottom-left cluster) becomes available once the selected panel has a CW Type, and acts in the <b>Wall Border</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal)</li>
+      <li><b>Click a panel</b> (Unroll Elevations) selects + zooms it (its width/height labels turn grey) and enables the <b>CW Type</b> button (bottom-left cluster) — the only cluster button available until a type is assigned · click the empty canvas (or Esc) to step back out</li>
+      <li><b>← / → arrow keys</b> (while zoomed into a wall border) jump to the <b>previous / next border</b> along the strip — the same animated zoom-in as clicking the neighbouring panel, wrapping around the loop · the focused border also lights <b>red on the 3D minimap</b> (as if moused over) so you can track which wall is in focus</li>
+      <li><b>CW Type</b> (first in the bottom-left cluster) assigns the curtain-wall system <b>per panel</b> — select a panel, then click (chevron ▾ marks the menu) to choose <b>Stick System</b> or <b>Unitized System</b> · the button shows the selected panel's "CW Type: <i>name</i>" · assigning a type <b>unlocks the rest of the row — Floor Lines, Centerlines, Framing</b> (all stay disabled until a panel's CW Type is set) · a panel holds only ONE system, so switching its type <b>clears that panel's framing of the other system</b> (its centerlines are kept)</li>
+      <li><b>Framing</b> (last in the bottom-left cluster) becomes available once the selected panel has a CW Type, and acts in the <b>Wall Border</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal) · with the tool armed, <b>clicking a different wall border</b> (away from this panel's lines) reframes to it with <b>Framing still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · the <b>eye icon</b> on the button's right edge shows / hides all framing on the canvas without deleting it</li>
       <li>with the <b>Unitized System</b>, hover a cell's centerlines to highlight the <b>single nearest edge</b> of the cell under the cursor, then <b>click-drag</b> to inset that one edge <b>into the cell</b> in <b>0.25′</b> increments · hold <b>Shift</b> while dragging to inset <b>all four edges</b> of that cell together · each framed edge draws the solid frame face inset into the cell AND turns the affected <b>centerline segment solid</b> on top of the dashed centerline (the framed mullion) · the edit <b>mirrors live to every same-shape (Material ID) cell</b> across all elevations/panels — editing one cell updates all identical cells project-wide (see the <b>View</b> button's Material ID colours / <b>Unique cells</b> count for the groups)</li>
-      <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · Esc or re-click the button to finish</li>
-      <li><b>Eraser</b> (bottom-right, just left of the <b>?</b> help button) arms the delete tool: enabled once the selected panel has a <b>CW Type</b> · <b>hover</b> near a panel's centerline <em>or</em> a floor plate to highlight it · <b>click</b> deletes it · <b>click-drag</b> across multiple lines to erase them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · erasing a panel's centerline also <b>clears that panel's framing</b> on that axis (the same way adding a centerline does — re-apply framing afterwards), so no frame bars linger along the border without their centerlines · the default <b>0′ ground floor line</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor Lines</li>
-      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>Technical</b> is the default drafting look (centerlines, framing, and dimensions) · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a Grasshopper-style gradient — <b>N = dark blue</b>, <b>E = blue</b>, <b>S = yellow</b>, <b>W = orange</b>, with NE/SE/SW/NW on the blends between — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map · <b>Clean</b> renders a presentation view — the panels fill <b>white</b> behind the framing and the <b>centerlines</b> and <b>dimensions</b> are hidden (the framing/mullions stay; floor lines follow the <b>Floor Lines</b> submenu's Show / Hide) · <b>Shadows</b> is a 2.5D presentation built on Clean — every framing bar (Stick mullions + Unitized cell framing) reads as raised above the glass and casts a crisp, hard-edged <b>drop shadow</b> onto the glass beside it (falling into cells and across into neighbours, but never on the frame infill); the shadow length scales with zoom · the elevation/panel/assembly geometry is drawn <b>monochrome</b> (blue/teal tints dropped for neutral greys), while the red + blue hover highlights stay coloured</li>
+      <li><b>Type</b> (right of Framing) becomes available once the selected wall border has <b>at least one frame</b> created · arms/blue like the other cluster tools and is disabled in the <b>Building Perimeter</b> tab · the <b>eye icon</b> on its right edge will show / hide the frame types on the canvas <i>(scaffolded — assignment + rendering are not wired up yet)</i></li>
+      <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · with the tool armed, <b>clicking a different wall border</b> reframes to it with <b>Centerlines still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · the <b>eye icon</b> on the button's right edge shows / hides all centerlines on the canvas without deleting them · Esc or re-click the button to finish</li>
+      <li><b>Erase</b> (bottom-right cluster, just left of the <b>?</b> help button) arms the delete tool and works in BOTH views · <b>Building Perimeter view:</b> hover a perimeter <b>vertex</b> (it turns <b>red</b>) and <b>click</b> to delete it, or <b>click-drag</b> across several vertices to remove them all in one stroke (committed as one undo step; dropping below 3 points reopens the shape) · hover a perimeter <b>edge</b> away from its corners (closed shape only) to highlight that segment <b>red</b> and <b>click</b> to remove it — <b>reopening the loop there while keeping both vertices</b> — or <b>click-drag</b> along the boundary to erase several segments at once · any vertex left <b>alone</b> by losing both its walls (e.g. between two erased edges) is <b>auto-deleted</b> too (it pre-highlights red) ·<b>Unravel view:</b> <b>hover</b> near a panel's centerline <em>or</em> a floor plate to highlight it, <b>click</b> deletes it, and <b>click-drag</b> across multiple lines erases them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · erasing a panel's centerline also <b>clears that panel's framing</b> on that axis (the same way adding a centerline does — re-apply framing afterwards), so no frame bars linger along the border without their centerlines · the default <b>0′ ground floor line</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor Lines</li>
+      <li><b>Dim</b> (bottom-right cluster, right of Erase) — clicking the word does nothing yet; its <b>eye icon</b> is the single source of truth for the on-canvas <b>dimensions</b> (the panel width / per-column-row / cell labels and the height input fields across the <b>Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs) · click the eye to show / hide them all (visible by default) · disabled in the <b>Building Perimeter</b> tab · <b>no view (Clean / Shadows) auto-hides dimensions</b> — only the Dim eye does</li>
+      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>Technical</b> is the default drafting look (centerlines, framing, and dimensions) · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) and labels each cell with its <b>shape number</b> at its centre (same shape ⇒ same number, like a paint-by-number key) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a vivid cold→hot thermal gradient — <b>N = blue</b>, <b>E = cyan</b>, <b>S = yellow</b>, <b>W = red</b>, with NE/SE/SW/NW on the blends between (sweeping through green and orange) — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map · <b>Clean</b> renders a presentation view — the panels fill <b>white</b> behind the framing · <b>no view ever auto-hides floor lines, centerlines, framing, or dimensions</b> — those four are shown/hidden ONLY by their per-button toggles (the eye icons and the <b>Dim</b> button) · <b>Shadows</b> is a 2.5D presentation built on Clean — every framing bar (Stick mullions + Unitized cell framing) reads as raised above the glass and casts a crisp, hard-edged <b>drop shadow</b> onto the glass beside it (falling into cells and across into neighbours, but never on the frame infill); the shadow length scales with zoom · the elevation/panel/assembly geometry is drawn <b>monochrome</b> (blue/teal tints dropped for neutral greys), while the red + blue hover highlights stay coloured</li>
       <li><b>Hover an edge</b> (edit mode) highlights that edge's line on the active mini-window thumbnail · in unravel, hovering a panel lights its wall instead</li>
       <li><b>Projects panel:</b> click load (fits the shape to the view) · drag preview to rotate · double-click preview for top-down plan view · drag title to move · ☀ toggle a larger <b>Solar Study</b> popup · ✎ rename · <b>⧉ duplicate</b> the whole project (perimeter, elevations, framing — everything) into a new <i>Option</i> · <b>× delete</b> — <b>undoable</b> with Ctrl+Z (Ctrl+Y redoes) · <b>＋ footer</b> (Building Perimeter tab only) saves the current sketch as a new project</li>
       <li><b>Solar Study</b> (☀ popup) draws a 3D <b>sun-path dome</b> around the massing from real solar geometry · drag to rotate · double-click for an aerial top-down view (synced with the thumbnail) · <b>Orientation dial</b> — drag the needle (or type degrees) to set the drawing's North relative to the cardinal directions · <b>Date</b> and <b>Solar time</b> sliders move the sun along its path (with a live altitude / azimuth readout) · <b>Latitude</b> field (temporary Omaha, NE default until the address is geocoded) · Location field inherits the sketch's address · settings are saved with the sketch</li>

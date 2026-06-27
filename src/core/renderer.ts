@@ -54,8 +54,8 @@ function parseHexRGB(hex: string): RGB {
 }
 
 /**
- * Sample a multi-stop colour ramp (the Orientation Heatmap gradient — Grasshopper-
- * style dark-blue → blue → yellow → orange) at position `t` in [0,1], blending the
+ * Sample a multi-stop colour ramp (the Orientation Heatmap gradient — a vivid cold→hot
+ * thermal scale, blue → cyan → yellow → red) at position `t` in [0,1], blending the
  * two bracketing stops in RGB. Returns an `rgba(...)` string at the given alpha.
  */
 function sampleRamp(stops: RGB[], t: number, alpha: number): string {
@@ -148,7 +148,9 @@ export interface UnravelDraw {
    * of this panel, carrying a `colorIndex` that groups cells of identical geometric
    * SHAPE across the whole project. The renderer turns the index into a distinct hue
    * (golden-angle spread) and fills the cell with it — a Lumion-style Material ID
-   * overlay so matching cells read in the same colour. Undefined when the view is off.
+   * overlay so matching cells read in the same colour. `shade` is the cell's position
+   * (0 → 1) within its shape group; the renderer tapers saturation across it so
+   * identical cells get slightly different shades. Undefined when the view is off.
    */
   cellColors?: Array<{
     x0: number;
@@ -156,6 +158,7 @@ export interface UnravelDraw {
     y0: number;
     y1: number;
     colorIndex: number;
+    shade?: number;
   }>;
   /**
    * ORIENTATION HEATMAP view (the "View" button's Orientation mode): one entry per
@@ -197,6 +200,16 @@ export interface RenderState {
   selectedVertex: number;
   /** Index of hovered vertex, or -1. */
   hoveredVertex: number;
+  /** Erase tool armed in the perimeter view: the hovered vertex is drawn in the
+   *  delete colour (a click removes it) rather than the normal hover colour. */
+  eraseVertexArmed?: boolean;
+  /** Perimeter vertex indices collected during an active Erase click-drag stroke,
+   *  drawn in the delete colour to preview what the pointer-up commit will remove. */
+  eraseVertices?: number[];
+  /** Erase tool: perimeter EDGE indices targeted for removal — the hovered edge and
+   *  any swept up during a click-drag stroke — each drawn in the delete colour so the
+   *  user sees which segments a release will remove. Empty/undefined when none. */
+  eraseEdges?: number[];
   /** Vertex whose Bézier handles should be drawn (selected/active), or -1. */
   handleVertex: number;
   /** Candidate point on a segment for vertex insertion (edit mode), or null. */
@@ -333,27 +346,48 @@ export interface RenderState {
   unravelBoundariesOnly?: boolean;
   /**
    * CLEAN view (the "View" button's Clean mode). When true the UNRAVEL panels render
-   * as a clean presentation: each panel is filled opaque WHITE behind the framing, and
-   * the centerlines (cell splits / divisions / dividers), the dimension labels, and the
-   * floor plates are all HIDDEN. The framing (mullion faces) is still drawn. Default
-   * false/undefined (every other view renders normally).
+   * as a clean presentation: each panel is filled opaque WHITE behind the framing. NO
+   * view auto-hides floor lines, centerlines, framing, OR dimensions — those four follow
+   * ONLY their per-button visibility toggles (floorPlatesHidden / centerlinesHidden /
+   * framingHidden / dimensionsHidden). Default false/undefined (renders normally).
    */
   cellClean?: boolean;
   /**
    * SHADOWS view (the "View" button's Shadows mode). A 2.5D presentation: it renders
-   * the same clean white glass as CLEAN (centerlines / dimensions / floor plates hidden),
-   * and ADDITIONALLY treats every framing bar (Stick mullions + Unitized cell framing) as
+   * the same clean white glass as CLEAN (floor lines / centerlines / framing / dimensions
+   * follow their visibility toggles, never the view), and ADDITIONALLY
+   * treats every framing bar (Stick mullions + Unitized cell framing) as
    * a member raised above the glass that casts a crisp, hard-edged drop shadow onto the
    * glass beside it. The shadow falls on the glass on both sides of a bar (into cells and
    * across into neighbours) but never on the frame infill itself. Default false/undefined.
    */
   cellShadows?: boolean;
   /**
-   * Floor Lines "Hide" (the Floor Lines submenu's visibility toggle). When true, the floor
-   * lines (and their elevation labels / eraser highlights) are NOT drawn — they are only
-   * hidden from view, not deleted. Default false/undefined (floor lines drawn normally).
+   * Floor Lines "Hide" (the Floor Lines button's visibility-toggle icon). When true, the
+   * floor lines (and their elevation labels / eraser highlights) are NOT drawn — they are
+   * only hidden from view, not deleted. Default false/undefined (floor lines drawn normally).
    */
   floorPlatesHidden?: boolean;
+  /**
+   * Centerlines visibility-toggle icon (on the Centerlines button). When true the
+   * centerlines — equal-cell splits, vertical divisions, and horizontal dividers — are
+   * NOT drawn (kept in the model, just hidden). Default false/undefined (drawn normally).
+   */
+  centerlinesHidden?: boolean;
+  /**
+   * Framing visibility-toggle icon (on the Framing button). When true every framing
+   * face — Stick mullion bands (mullionV / mullionH) and Unitized per-cell frame faces
+   * (cellFraming) — is NOT drawn (kept in the model, just hidden). Default false.
+   */
+  framingHidden?: boolean;
+  /**
+   * Dim visibility-toggle (the Dim button + its eye icon). When true the on-canvas
+   * DIMENSION labels — the per-panel overall-width label, the Panels-phase per-column /
+   * per-row dimensions, and the Assembly-phase focused-cell four-side dimensions — are
+   * NOT drawn. This is the SINGLE source of truth for dimension visibility: the Clean /
+   * Shadows views no longer auto-hide dimensions. Default false (dimensions drawn).
+   */
+  dimensionsHidden?: boolean;
 }
 
 /** Read a CSS custom property from an element, with a fallback. */
@@ -386,6 +420,7 @@ export function render(
     vertex: cssVar(canvas, "--vertex-color", "#3a4754"),
     vertexHover: cssVar(canvas, "--vertex-hover-color", "#c2700a"),
     vertexSelected: cssVar(canvas, "--vertex-selected-color", "#d23154"),
+    vertexErase: cssVar(canvas, "--vertex-erase-color", "#d23154"),
     vertexFirst: cssVar(canvas, "--vertex-first-color", "#1f9d6b"),
     insert: cssVar(canvas, "--insert-preview-color", "#c2700a"),
     handleLine: cssVar(canvas, "--handle-line-color", "#8492a0"),
@@ -417,20 +452,22 @@ export function render(
     unravelEdgeSelect: cssVar(canvas, "--unravel-edge-select", "#e5484d"),
     // Material-ID cell view: HSL saturation / lightness (%) and fill alpha for the
     // procedurally-hued per-cell shape tint (hue itself is golden-angle generated).
-    cellViewSat: cssNum(canvas, "--cellview-saturation", 65),
-    cellViewLight: cssNum(canvas, "--cellview-lightness", 58),
-    cellViewAlpha: cssNum(canvas, "--cellview-fill-alpha", 0.62),
+    // shadeFalloff is the FRACTION of saturation removed across a shape group, so
+    // identical cells fan from full saturation down to (1 - falloff) of it.
+    cellViewSat: cssNum(canvas, "--cellview-saturation", 100),
+    cellViewLight: cssNum(canvas, "--cellview-lightness", 50),
+    cellViewAlpha: cssNum(canvas, "--cellview-fill-alpha", 1),
+    cellViewShadeFalloff: cssNum(canvas, "--cellview-shade-falloff", 0.5),
     // Orientation heatmap: a Grasshopper-style multi-stop ramp sampled by each cell's
     // heat scalar t (0 = north/cool → 1 = west/warm). Stops run dark blue → blue →
     // yellow → orange; the fill alpha + centred cardinal label colour are separate.
     orientStops: [
-      parseHexRGB(cssVar(canvas, "--orient-stop-0", "#0a2a6b")),
-      parseHexRGB(cssVar(canvas, "--orient-stop-1", "#2f7ff0")),
-      parseHexRGB(cssVar(canvas, "--orient-stop-2", "#f5d11e")),
-      parseHexRGB(cssVar(canvas, "--orient-stop-3", "#f5871f")),
+      parseHexRGB(cssVar(canvas, "--orient-stop-0", "#0b3bd6")),
+      parseHexRGB(cssVar(canvas, "--orient-stop-1", "#16b9e8")),
+      parseHexRGB(cssVar(canvas, "--orient-stop-2", "#ffd60a")),
+      parseHexRGB(cssVar(canvas, "--orient-stop-3", "#ff2d1c")),
     ],
-    orientAlpha: cssNum(canvas, "--orient-fill-alpha", 0.7),
-    orientLabel: cssVar(canvas, "--orient-label-color", "#11161c"),
+    orientAlpha: cssNum(canvas, "--orient-fill-alpha", 1),
     // Mullions tool: the paired mullion-face lines drawn ±offset around each grid line.
     unravelMullion: cssVar(canvas, "--unravel-mullion-color", "#5b94a8"),
     highlight: cssVar(canvas, "--unravel-highlight-color", "#d23154"),
@@ -490,6 +527,9 @@ export function render(
       state.unravelBoundariesOnly ?? false,
       state.cellClean ?? false,
       state.cellShadows ?? false,
+      state.centerlinesHidden ?? false,
+      state.framingHidden ?? false,
+      state.dimensionsHidden ?? false,
       tk,
     );
     // OVERVIEW boundaries-only mode draws nothing but the panel rectangles — no
@@ -567,6 +607,20 @@ export function render(
     drawHighlightEdge(ctx, state.viewport, state.perimeter, state.highlightEdge, tk);
   }
 
+  // Erase tool: every edge the cursor is targeting (hover + drag-collected), re-drawn
+  // in the delete colour so they read as "click / release to remove these segments"
+  // (the loop reopens at each gap; orphaned vertices, drawn red below, drop with them).
+  if (state.eraseEdges) {
+    for (const ei of state.eraseEdges) {
+      if (ei >= 0) {
+        drawHighlightEdge(ctx, state.viewport, state.perimeter, ei, {
+          highlight: tk.vertexErase,
+          highlightW: tk.highlightW,
+        });
+      }
+    }
+  }
+
   // Bézier handles for the selected/active vertex (lines + knobs).
   if (state.handleVertex >= 0 && state.handleVertex < v.length) {
     drawHandles(ctx, state.viewport, v[state.handleVertex], tk);
@@ -613,11 +667,16 @@ export function render(
   }
 
   // Vertices on top.
+  const eraseSet = state.eraseVertices && state.eraseVertices.length > 0 ? new Set(state.eraseVertices) : null;
   v.forEach((pt, i) => {
     const s = toScreen(state.viewport, pt);
     let color = tk.vertex;
     if (i === 0 && !state.perimeter.closed && state.drawing) color = tk.vertexFirst;
-    if (i === state.hoveredVertex) color = tk.vertexHover;
+    // While the Erase tool is armed, the hovered vertex signals deletion (red);
+    // otherwise it uses the normal warm hover colour.
+    if (i === state.hoveredVertex) color = state.eraseVertexArmed ? tk.vertexErase : tk.vertexHover;
+    // Vertices collected during an Erase drag stroke are all flagged for deletion.
+    if (eraseSet?.has(i)) color = tk.vertexErase;
     if (i === state.selectedVertex) color = tk.vertexSelected;
     ctx.beginPath();
     ctx.arc(s.x, s.y, tk.vertexR, 0, Math.PI * 2);
@@ -867,10 +926,17 @@ function drawUnravel(
   /** ASSEMBLY phase: which edge of the focused cell to stroke red (hovered), or null. */
   focusedCellEdge: "top" | "right" | "bottom" | "left" | null,
   boundariesOnly: boolean,
-  /** CLEAN view: white panel fill, centerlines / dimensions / floor plates hidden. */
+  /** CLEAN view: white panel fill only (centerlines / framing / floor lines / dimensions
+   *  follow their visibility toggles, not the view). */
   clean: boolean,
   /** SHADOWS view: like CLEAN, plus raised-frame hard drop shadows on the glass. */
   shadows: boolean,
+  /** Centerlines visibility-toggle icon: when true, all centerlines are suppressed. */
+  centerlinesHidden: boolean,
+  /** Framing visibility-toggle icon: when true, all framing faces are suppressed. */
+  framingHidden: boolean,
+  /** Dim visibility-toggle: when true, all dimension labels are suppressed (no view auto-hides them). */
+  dimensionsHidden: boolean,
   tk: {
     unravelLine: string;
     unravelCurve: string;
@@ -890,9 +956,9 @@ function drawUnravel(
     cellViewSat: number;
     cellViewLight: number;
     cellViewAlpha: number;
+    cellViewShadeFalloff: number;
     orientStops: RGB[];
     orientAlpha: number;
-    orientLabel: string;
     unravelMullion: string;
     highlight: string;
     segmentW: number;
@@ -919,9 +985,11 @@ function drawUnravel(
     const w = baseR.x - baseL.x;
     const rectH = baseL.y - topL.y;
 
-    // PRESENTATION views (CLEAN and SHADOWS) share the same hiding rules: white glass,
-    // and the centerlines / dimensions / floor plates suppressed. SHADOWS layers raised-
-    // frame drop shadows on top of that clean base.
+    // PRESENTATION views (CLEAN and SHADOWS) share the same base: white glass. They do
+    // NOT hide floor lines / centerlines / framing / dimensions — all four follow only
+    // their per-button visibility toggles. `presentation` now only drives the WHITE panel
+    // fill and the framing render STYLE (mitered insets / face breaks). SHADOWS layers
+    // raised-frame drop shadows on top of that clean base.
     const presentation = clean || shadows;
 
     // Fill. PRESENTATION views fill the panel opaque WHITE (the glass behind the framing);
@@ -940,7 +1008,10 @@ function drawUnravel(
         const c0 = toScreen(vp, { x: cc.x0, y: cc.y0 });
         const c1 = toScreen(vp, { x: cc.x1, y: cc.y1 });
         const hue = (cc.colorIndex * CELL_VIEW_GOLDEN_ANGLE) % 360;
-        ctx.fillStyle = `hsla(${hue}, ${tk.cellViewSat}%, ${tk.cellViewLight}%, ${tk.cellViewAlpha})`;
+        // Taper saturation across the cell's shade fraction so identical cells (same
+        // hue/number) fan from full saturation down to (1 - falloff) of it.
+        const sat = tk.cellViewSat * (1 - tk.cellViewShadeFalloff * (cc.shade ?? 0));
+        ctx.fillStyle = `hsla(${hue}, ${sat}%, ${tk.cellViewLight}%, ${tk.cellViewAlpha})`;
         ctx.fillRect(
           Math.min(c0.x, c1.x),
           Math.min(c0.y, c1.y),
@@ -1001,9 +1072,10 @@ function drawUnravel(
     ctx.setLineDash([9, 4, 1.5, 4]);
 
     // Cell splits: N-1 equal-width vertical division lines inside the rectangle.
-    // Hidden in CLEAN view (centerlines are suppressed there).
+    // Centerline visibility is controlled ONLY by the Centerlines eye icon
+    // (centerlinesHidden) — NO view (Clean / Shadows included) auto-hides them.
     const nCells = Math.max(1, Math.round(cells));
-    if (!presentation && nCells > 1) {
+    if (!centerlinesHidden && nCells > 1) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (let k = 1; k < nCells; k++) {
@@ -1019,7 +1091,7 @@ function drawUnravel(
 
     // User-placed division lines (Centerlines tool): dashed centerlines at each stored
     // OFFSET from the panel's left edge, baseline → top. Drawn in the cell colour.
-    if (!presentation && divisions && divisions.length > 0) {
+    if (!centerlinesHidden && divisions && divisions.length > 0) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (const off of divisions) {
@@ -1036,7 +1108,7 @@ function drawUnravel(
     // User-placed HORIZONTAL dividers (Centerlines tool + Shift): dashed centerlines at
     // each stored OFFSET from the panel's baseline (y = 0), spanning x0 → x1. Same cell
     // colour/width as the vertical divisions, just rotated 90°.
-    if (!presentation && dividersH && dividersH.length > 0) {
+    if (!centerlinesHidden && dividersH && dividersH.length > 0) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (const off of dividersH) {
@@ -1088,7 +1160,7 @@ function drawUnravel(
     // NEVER on the frame infill. Drawn here, BEFORE the frame faces below, so those crisp
     // lines sit on top. Bar geometry matches the framing drawn later (Stick ±offset bands;
     // Unitized mitered borders inset to the infill rect).
-    if (shadows) {
+    if (shadows && !framingHidden) {
       type Rect = { x: number; y: number; w: number; h: number };
       const toRect = (mx0: number, my0: number, mx1: number, my1: number): Rect => {
         const a = toScreen(vp, { x: mx0, y: my0 });
@@ -1166,7 +1238,7 @@ function drawUnravel(
       }
     }
 
-    if (mv > 0 && gridXs.length > 0) {
+    if (!framingHidden && mv > 0 && gridXs.length > 0) {
       ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
       for (const cx of gridXs) {
@@ -1181,7 +1253,7 @@ function drawUnravel(
         }
       }
     }
-    if (mh > 0 && gridYs.length > 0) {
+    if (!framingHidden && mh > 0 && gridYs.length > 0) {
       ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
       // CLEAN view: keep the VERTICAL mullions reading as clean continuous lines by
@@ -1268,7 +1340,7 @@ function drawUnravel(
     // CENTERLINE (or panel border) for exactly this cell's span, so the centerline
     // segment a frame is generated against reads as a SOLID framed mullion, not a bare
     // dashed centerline. Drawn after the dashed centerlines above, so it sits on top.
-    if (cellFraming && cellFraming.length > 0) {
+    if (!framingHidden && cellFraming && cellFraming.length > 0) {
       ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
       const seg2 = (ax: number, ay: number, bx: number, by: number) => {
@@ -1433,6 +1505,9 @@ function drawUnravel(
 
     // ORIENTATION HEATMAP labels: the cell's 8-point cardinal (N, NE, …) drawn
     // CENTRED in each cell, on top of the fill + grid lines so it reads clearly.
+    // Drawn with the inverted 'difference' blend (no background plate) so the text
+    // auto-contrasts against whatever heatmap hue is behind it — matching the
+    // Material-ID label treatment in the one-button-drawing tool.
     // Skipped in overview boundaries-only mode and on cells too small to fit a label
     // (avoids piling overlapping text on a finely-subdivided panel).
     if (!boundariesOnly && cellOrient && cellOrient.length > 0) {
@@ -1444,7 +1519,26 @@ function drawUnravel(
         if (cw < 26 || ch < 18) continue;
         const cx = (c0.x + c1.x) / 2;
         const cy = (c0.y + c1.y) / 2;
-        drawCenteredLabel(ctx, canvas, cx, cy + 8, co.label, tk.orientLabel);
+        drawInvertedCellLabel(ctx, canvas, cx, cy, co.label);
+      }
+    }
+
+    // MATERIAL-ID numbers: the cell's shape index (1-based) drawn CENTRED in each
+    // cell, on top of the colour fill + grid lines. Cells of identical shape share a
+    // colour AND therefore a number, so the result reads like a paint-by-number key
+    // (matching the one-button-drawing Material-ID overlay). Same inverted 'difference'
+    // treatment, font and size as the orientation labels above. Skipped in overview
+    // boundaries-only mode and on cells too small to fit a label.
+    if (!boundariesOnly && cellColors && cellColors.length > 0) {
+      for (const cc of cellColors) {
+        const c0 = toScreen(vp, { x: cc.x0, y: cc.y0 });
+        const c1 = toScreen(vp, { x: cc.x1, y: cc.y1 });
+        const cw = Math.abs(c1.x - c0.x);
+        const ch = Math.abs(c1.y - c0.y);
+        if (cw < 26 || ch < 18) continue;
+        const cx = (c0.x + c1.x) / 2;
+        const cy = (c0.y + c1.y) / 2;
+        drawInvertedCellLabel(ctx, canvas, cx, cy, String(cc.colorIndex + 1));
       }
     }
 
@@ -1470,7 +1564,7 @@ function drawUnravel(
     // (below), so its single overall-width label is suppressed — the per-column
     // labels replace it (for a single-column panel they coincide, so nothing is
     // lost). Every other panel keeps the normal one overall-width label.
-    if (!presentation && seg.index !== cellDimEdge) {
+    if (!dimensionsHidden && seg.index !== cellDimEdge) {
       drawCenteredLabel(
         ctx,
         canvas,
@@ -1487,7 +1581,7 @@ function drawUnravel(
     // to the strip view's single width-per-panel label. Boundaries are derived the
     // SAME way as cellsForEdge / the division mullions above so the labels line up
     // exactly with the drawn grid (dedupe epsilon 1e-6).
-    if (!boundariesOnly && !presentation && seg.index === cellDimEdge) {
+    if (!boundariesOnly && !dimensionsHidden && seg.index === cellDimEdge) {
       const lo = Math.min(seg.x0, seg.x1);
       const hi = Math.max(seg.x0, seg.x1);
       // VERTICAL boundaries: panel borders + equal-cell splits + Subtractive divisions.
@@ -1567,9 +1661,10 @@ function drawUnravel(
     const labelH = 16;
     // Left/right HEIGHT labels match the other dimensions' default text colour.
     const labelColor = cssVar(canvas, "--label-text", "#1c2530");
-    // Dimension labels are HIDDEN in CLEAN / SHADOWS presentation views (the red edge
-    // selection below stays so Assembly-phase edge targeting still works as an affordance).
-    if (!clean && !shadows) {
+    // Dimension labels follow ONLY the Dim toggle (dimensionsHidden) — no view auto-hides
+    // them. The red edge selection below stays regardless so Assembly-phase edge targeting
+    // still works as an affordance even with dimensions hidden.
+    if (!dimensionsHidden) {
       // TOP (width): centred above the top edge, its bottom edge one gap up.
       drawCenteredLabel(ctx, canvas, centerX, tl.y - tk.unravelLabelGap, fmtLengthTick(width));
       // BOTTOM (width): centred below the bottom edge. drawCenteredLabel sits the
@@ -1626,6 +1721,34 @@ function drawCenteredLabel(
   ctx.fillStyle = fg;
   ctx.textBaseline = "middle";
   ctx.fillText(text, x + padding, y + h / 2);
+}
+
+/**
+ * Inverted cell label centred on `(cx, cy)` — used by both the Orientation heatmap
+ * (cardinal N, NE, S, …) and the Material-ID view (per-shape number).
+ *
+ * Unlike {@link drawCenteredLabel} this draws NO background plate. The glyphs are
+ * composited with the 'difference' blend over white, so the colour auto-inverts
+ * against whatever cell hue sits behind it (like the classic inverted mouse
+ * pointer) — maximum contrast on any background with no outline/halo. This mirrors
+ * the Material-ID label treatment in the one-button-drawing tool. Font and size
+ * match the shared label token so the text reads identically across views.
+ */
+function drawInvertedCellLabel(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  cx: number,
+  cy: number,
+  text: string,
+): void {
+  ctx.save();
+  ctx.globalCompositeOperation = "difference";
+  ctx.fillStyle = "#ffffff"; // difference vs white ⇒ inverted colour of the background pixel
+  ctx.font = cssVar(canvas, "--label-font", "12px ui-monospace, monospace");
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
 }
 
 /**

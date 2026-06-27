@@ -44,6 +44,129 @@ export function deleteVertex(p: Perimeter, index: number): Perimeter {
   return { vertices, closed };
 }
 
+/**
+ * Delete multiple vertices at once (by index), in a single pass so the indices
+ * stay valid regardless of order. Reopens a closed polygon if the result drops
+ * below 3 vertices. Used by the Erase tool's click-drag stroke.
+ */
+export function deleteVertices(p: Perimeter, indices: number[]): Perimeter {
+  if (indices.length === 0) return p;
+  const remove = new Set(indices);
+  const vertices = p.vertices.filter((_, i) => !remove.has(i));
+  if (vertices.length === p.vertices.length) return p;
+  const closed = p.closed && vertices.length >= 3;
+  return { vertices, closed };
+}
+
+/**
+ * Combined Erase commit for the building perimeter: remove a set of EDGES and a
+ * set of VERTICES in one pass, then auto-drop any vertex left ISOLATED — both of
+ * its incident edges gone — so no point is ever stranded without a wall ("no
+ * vertex left alone"). Returns the surviving chain.
+ *
+ * Semantics, evaluated against the ORIGINAL chain (`edge i` runs from vertex i to
+ * vertex (i+1), wrapping when closed):
+ *  - An explicitly-erased VERTEX is spliced out; its two walls MERGE into one
+ *    (matching the standalone vertex-erase) as long as neither was also cut.
+ *  - An erased EDGE opens a gap between its two endpoints.
+ *  - A run of adjacent erased edges collapses to a SINGLE gap: every vertex
+ *    strictly inside the run has both walls gone, so it is dropped.
+ *
+ * The result is kept as ONE chain. With no edge cut (pure vertex merges) the
+ * perimeter stays closed (reopening only if it falls below 3 vertices). With one
+ * or more cuts it reopens; should a non-contiguous stroke split the boundary into
+ * several disjoint chains, the LONGEST is kept and the rest discarded (a single
+ * vertex list cannot hold more than one). Returns an empty perimeter if nothing
+ * substantial survives.
+ */
+export function eraseElements(
+  p: Perimeter,
+  edgeIndices: number[],
+  vertexIndices: number[],
+): Perimeter {
+  const n = p.vertices.length;
+  if (n === 0) return p;
+  const closedIn = p.closed;
+  const edgeCount = closedIn ? n : Math.max(0, n - 1);
+  const removedV = new Set(vertexIndices.filter((i) => i >= 0 && i < n));
+  const removedE = new Set(edgeIndices.filter((i) => i >= 0 && i < edgeCount));
+  if (removedV.size === 0 && removedE.size === 0) return p;
+
+  // Survivors: vertices not explicitly erased, in original order.
+  const survivors: number[] = [];
+  for (let i = 0; i < n; i++) if (!removedV.has(i)) survivors.push(i);
+  const k = survivors.length;
+  if (k === 0) return { vertices: [], closed: false };
+
+  // Is the boundary span between two survivors broken by a cut edge? Walks the
+  // original edges from vertex `fromV` forward until it reaches `toV`, returning
+  // true if any of them was erased (merged-out vertices in between are skipped).
+  const spanBroken = (fromV: number, toV: number): boolean => {
+    let e = fromV;
+    for (let guard = 0; guard <= n; guard++) {
+      if (removedE.has(e)) return true;
+      const arrive = closedIn ? (e + 1) % n : e + 1;
+      if (arrive === toV) return false;
+      e = arrive; // the next edge's index is the vertex we just reached
+    }
+    return false;
+  };
+
+  // Build adjacency among survivors via intact spans; count the cuts.
+  const adj = new Map<number, number[]>(survivors.map((v) => [v, []]));
+  const linkCount = closedIn ? k : k - 1;
+  let cuts = 0;
+  for (let a = 0; a < linkCount; a++) {
+    const va = survivors[a];
+    const vb = survivors[(a + 1) % k];
+    if (spanBroken(va, vb)) {
+      cuts++;
+    } else {
+      adj.get(va)!.push(vb);
+      adj.get(vb)!.push(va);
+    }
+  }
+
+  // No cut: pure vertex merges — the chain keeps its original openness.
+  if (cuts === 0) {
+    const vertices = survivors.map((i) => p.vertices[i]);
+    return { vertices, closed: closedIn && vertices.length >= 3 };
+  }
+
+  // One or more cuts → open chain(s). Extract connected components and keep the
+  // largest (drops isolated orphan vertices and any lesser split-off chain).
+  const visited = new Set<number>();
+  let best: number[] = [];
+  for (const start of survivors) {
+    if (visited.has(start)) continue;
+    const comp: number[] = [];
+    const stack = [start];
+    visited.add(start);
+    while (stack.length) {
+      const v = stack.pop()!;
+      comp.push(v);
+      for (const nb of adj.get(v)!) if (!visited.has(nb)) { visited.add(nb); stack.push(nb); }
+    }
+    if (comp.length > best.length) best = comp;
+  }
+  if (best.length < 2) return { vertices: [], closed: false };
+
+  // Order the kept path: start at an endpoint (degree 1) and walk the adjacency.
+  const endpoint = best.find((v) => adj.get(v)!.length === 1) ?? best[0];
+  const order: number[] = [];
+  const seen = new Set<number>();
+  let cur: number | undefined = endpoint;
+  let prev = -1;
+  while (cur !== undefined && !seen.has(cur)) {
+    seen.add(cur);
+    order.push(cur);
+    const next: number | undefined = adj.get(cur)!.find((x) => x !== prev && !seen.has(x));
+    prev = cur;
+    cur = next;
+  }
+  return { vertices: order.map((i) => p.vertices[i]), closed: false };
+}
+
 /** Remove the last vertex (used during drawing to undo the last click). */
 export function popVertex(p: Perimeter): Perimeter {
   if (p.closed || p.vertices.length === 0) return p;

@@ -41,6 +41,10 @@
   --color-panel-bg: #f7f9fb;        /* Tool panel background */
   --color-panel-border: #d3dae1;    /* Panel / divider borders */
   --color-statusbar-bg: #f1f4f7;    /* Bottom status bar background */
+  /* Status-bar contextual TOOL HINT text (shown right of the X/Y cursor readouts).
+     Matched to --color-accent — the app's primary themed blue (active controls /
+     open segments) — so the hint reads as informational guidance, not an alert. */
+  --statusbar-hint-color: var(--color-accent);
 
   /* === COLOR · TEXT === */
   --color-text: #1c2530;            /* Primary text (dark on light) */
@@ -71,6 +75,7 @@
   --vertex-color: #3a4754;          /* Default vertex dot (dark, reads on white) */
   --vertex-hover-color: #c2700a;    /* Hovered vertex */
   --vertex-selected-color: #d23154; /* Selected vertex */
+  --vertex-erase-color: #d23154;    /* Vertex under the cursor while the Erase tool is armed (click deletes it) */
   --vertex-first-color: #1f9d6b;    /* First vertex (close affordance) */
   --insert-preview-color: #c2700a;  /* Insert-on-segment marker */
   --handle-line-color: #8492a0;     /* Bézier handle leader line (anchor → knob) */
@@ -116,10 +121,17 @@
      procedurally (golden-angle spread) in the renderer; these tokens control the
      constant SATURATION / LIGHTNESS / FILL ALPHA of every such tint so the whole
      palette's intensity is editable from here without touching code. Saturation and
-     lightness are plain percentage NUMBERS (no % sign); alpha is 0–1. */
-  --cellview-saturation: 65;   /* HSL saturation (%) for every cell tint */
-  --cellview-lightness: 58;    /* HSL lightness (%) for every cell tint */
-  --cellview-fill-alpha: 0.62; /* Fill opacity so underlying grid lines/borders read through */
+     lightness are plain percentage NUMBERS (no % sign); alpha is 0–1.
+     Values mirror the one-button-drawing Material-ID map: FULLY saturated, mid
+     lightness, OPAQUE — a vivid flat segmentation palette (grid lines/centerlines are
+     drawn on TOP of the fill, so opacity is no longer needed to keep them readable). */
+  --cellview-saturation: 100;  /* HSL saturation (%) for the most-saturated cell of each shape group */
+  --cellview-lightness: 50;    /* HSL lightness (%) for every cell tint */
+  --cellview-fill-alpha: 1;    /* Fully opaque flat colour blocks (paint-by-number look) */
+  /* Identical cells (same shape ⇒ same hue + number) fan out in SATURATION so they
+     read as a family: this is the fraction of saturation removed from the first cell
+     of a group to the last (0 = all cells identical; 0.5 = last cell at half saturation). */
+  --cellview-shade-falloff: 0.5;
 
   /* === ORIENTATION HEATMAP CELL VIEW ===
      The "View" button's Orientation mode colours each cell by the compass direction
@@ -129,14 +141,18 @@
      STOPS below are evenly spaced across that range and blended in RGB. They must be
      HEX colours. Cardinal landing points on this ramp: N → stop-0 (dark blue), E →
      stop-1 (blue), S → stop-2 (yellow), W → stop-3 (orange); NE/SE/SW/NW fall on the
-     blends between. Alpha is 0–1; the dark label colour sits on the shared label
-     plate (--label-bg) for contrast. */
-  --orient-stop-0: #0a2a6b;    /* heat 0.00 — N (coolest): dark blue */
-  --orient-stop-1: #2f7ff0;    /* heat 0.33 — E: blue */
-  --orient-stop-2: #f5d11e;    /* heat 0.67 — S: yellow */
-  --orient-stop-3: #f5871f;    /* heat 1.00 — W (warmest): orange */
-  --orient-fill-alpha: 0.78;   /* Fill opacity over the panel */
-  --orient-label-color: #11161c; /* Centred cardinal-direction label text */
+     blends between. Alpha is 0–1; the cardinal labels invert over the fill (no plate).
+     The stops are a vivid COLD → HOT thermal scale (blue → cyan → yellow → red) so the
+     view reads like a true solar-irradiance heatmap; the midpoints sweep through green
+     and orange as a cell's facing rotates, for a full thermal spectrum. */
+  --orient-stop-0: #0b3bd6;    /* heat 0.00 — N (coolest): vivid blue */
+  --orient-stop-1: #16b9e8;    /* heat 0.33 — E: vivid cyan */
+  --orient-stop-2: #ffd60a;    /* heat 0.67 — S: vivid yellow */
+  --orient-stop-3: #ff2d1c;    /* heat 1.00 — W (hottest): vivid red */
+  --orient-fill-alpha: 1;      /* Fully opaque so the heatmap colours read at full vibrancy */
+  /* Cardinal-direction labels (N, NE, S, …) are drawn with an inverted 'difference'
+     blend so they auto-contrast against the heatmap hue behind each cell — no fixed
+     colour token (their colour is derived from the background, like an inverted cursor). */
 
   /* === FLOOR PLATES (horizontal level reference lines) ===
      Dotted horizontal lines placed via the "floor plate" tool. Shown in both the
@@ -150,7 +166,7 @@
      so they never clash with the panels or their width/height dimension labels.
      Independently tunable from --unravel-label-gap so the elevation markers can
      be nudged without moving the panel dimension labels. */
-  --floorplate-label-gap: 8px;
+  --floorplate-label-gap: 50px;
   /* Per-panel height editor (DOM <input> overlay parked OUTSIDE each rectangle's
      left side). Styled to MATCH the canvas-drawn width length-label: plain text,
      no border, NO infill/background — it reads as a bare vertical dimension, the
@@ -424,6 +440,7 @@
   --vertex-color: #cdd6e0;
   --vertex-hover-color: #ffb454;
   --vertex-selected-color: #ff5c7c;
+  --vertex-erase-color: #ff5c7c;
   --vertex-first-color: #5cd6a0;
   --insert-preview-color: #ffb454;
   --handle-line-color: #5d6b78;
@@ -440,11 +457,10 @@
   --unravel-cell-highlight-fill: rgba(127,178,255,0.24); /* Hovered individual CELL fill (Panels phase) — accent blue */
   --unravel-edge-select: #ff6166; /* Assembly phase: hovered focused-cell edge — brighter red for dark mode */
   --unravel-mullion-color: #6fb0c6; /* Mullions tool: paired mullion-face lines — lifted for dark mode */
-  /* Material-ID cell view — slightly lower lightness so saturated hues sit well on the dark canvas. */
-  --cellview-lightness: 52;
-  --cellview-fill-alpha: 0.55;
-  /* Orientation heatmap — slightly lower fill alpha so the saturated stops sit well on the dark canvas. */
-  --orient-fill-alpha: 0.7;
+  /* Material-ID cell view — the vivid opaque segmentation palette (S100 / L50 / opaque)
+     reads identically on any canvas, so the dark theme keeps the same values as the base. */
+  /* Orientation heatmap — the vivid opaque thermal ramp reads identically on any canvas,
+     so the dark theme keeps the same fully-opaque fill as the base (no override needed). */
   /* Height field text follows --label-text (set below), so no dark override needed here. */
   --label-text: #e6edf3;
   --label-bg: rgba(20, 24, 28, 0.85);
@@ -597,12 +613,66 @@ body {
   border-color: var(--color-accent);
 }
 
-/* SETTINGS gear button — pushed to the far RIGHT of the header (margin-left:auto),
-   so it sits at the top-right corner of the app. Square, like the other header icon
-   buttons; tints on hover and adopts the accent fill while its popup is open. Holds an
-   inline SVG gear (centred via flex) that inherits the button colour via currentColor. */
+/* RIGHT GROUP — wrapper that holds the Smart Search input and the Settings gear,
+   pushed to the far right of the header by margin-left:auto. Keeps the two items
+   as a tight horizontal pair with a small gap. */
+.nav-header__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* SMART SEARCH — auto-sizing input that grows with typed content up to ~half the
+   header width. Uses the CSS grid overlay technique: both the <input> and a hidden
+   sizer <span> share the same grid cell, so the column auto-sizes to the widest
+   child (the sizer mirrors the live value or placeholder). min-width keeps it usable
+   when empty; max-width caps growth at 45vw (roughly halfway across the full header). */
+.nav-header__search-wrap {
+  display: inline-grid;
+  min-width: 140px;
+  max-width: 45vw;
+}
+.nav-header__search-wrap > * {
+  grid-area: 1 / 1;
+}
+/* The hidden sizer span — same font/padding as the input so its measured width
+   exactly matches what the typed text would occupy in the real field. */
+.nav-header__search-sizer {
+  padding: 0 var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  white-space: pre;
+  visibility: hidden;
+  pointer-events: none;
+  height: 0;
+  overflow: hidden;
+}
+.nav-header__search {
+  width: 100%;
+  height: calc(var(--nav-header-height) - 12px);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--nav-header-border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  outline: none;
+  transition: border-color 120ms, background 120ms;
+}
+.nav-header__search::placeholder {
+  color: var(--color-text-faint);
+}
+.nav-header__search:hover {
+  background: var(--control-bg-hover);
+  border-color: var(--color-text-dim);
+}
+.nav-header__search:focus {
+  border-color: var(--color-accent);
+  background: var(--control-bg);
+}
+/* SETTINGS gear button — sits inside .nav-header__right (no auto margin needed). */
 .nav-header__settings {
-  margin-left: auto;          /* push to the right edge of the flex header */
   height: calc(var(--nav-header-height) - 12px);
   width: calc(var(--nav-header-height) - 12px);
   display: inline-flex;
@@ -999,6 +1069,7 @@ input[type="checkbox"] {
 .cwtype-btn,
 .mullions-btn,
 .subtractive-btn,
+.type-btn,
 .eraser-btn,
 .view-btn {
   height: var(--control-height);
@@ -1014,6 +1085,7 @@ input[type="checkbox"] {
 .cwtype-btn:hover,
 .mullions-btn:hover,
 .subtractive-btn:hover,
+.type-btn:hover,
 .eraser-btn:hover,
 .view-btn:hover { background: var(--control-bg-hover); }
 /* Armed state (Centerlines division / Mullions / Eraser deletion tool active) —
@@ -1021,6 +1093,7 @@ input[type="checkbox"] {
    white in every display mode (it opens a menu, it isn't an armed tool). */
 .subtractive-btn.is-active,
 .mullions-btn.is-active,
+.type-btn.is-active,
 .eraser-btn.is-active {
   background: var(--control-bg-active);
   border-color: var(--control-bg-active);
@@ -1030,6 +1103,7 @@ input[type="checkbox"] {
 .cwtype-btn:disabled,
 .mullions-btn:disabled,
 .subtractive-btn:disabled,
+.type-btn:disabled,
 .eraser-btn:disabled,
 .view-btn:disabled {
   opacity: 0.4;
@@ -1038,13 +1112,62 @@ input[type="checkbox"] {
 .cwtype-btn:disabled:hover,
 .mullions-btn:disabled:hover,
 .subtractive-btn:disabled:hover,
+.type-btn:disabled:hover,
 .eraser-btn:disabled:hover,
 .view-btn:disabled:hover { background: var(--control-bg); }
 
-/* === CW TYPE / FLOOR LINES chooser menus ===
-   The "CW Type" and "Floor Lines" buttons each open a small popup ABOVE them (drop-up).
-   Anchored to the button via a relative wrapper so they need no JS positioning. Both reuse
-   the .cw-menu / .cw-menu__btn styling below. */
+/* === TOOL-BUTTON VISIBILITY TOGGLE (eye icon) ===
+   The Floor Lines / Centerlines / Framing buttons each embed an eye icon in the RIGHT
+   edge of their rectangle that shows / hides the corresponding element on the canvas
+   WITHOUT deleting it. The icon is a sibling button overlaid on the right of the host
+   wrapper (position:relative); the main button carries `.has-vis` to reserve right
+   padding so its label clears the icon. The icon is disabled in lockstep with its
+   parent button. */
+.tool-vis-wrap { position: relative; display: inline-flex; }
+/* Reserve room on the button's right edge for the ~28px icon region (+ its divider). */
+.has-vis { padding-right: calc(var(--space-3) + 30px); }
+.vis-toggle {
+  position: absolute;
+  top: 1px;            /* sit just inside the parent button's 1px border */
+  right: 1px;
+  bottom: 1px;
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--control-border); /* thin divider so it reads as a sub-region */
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--control-text);
+  cursor: pointer;
+}
+.vis-toggle:hover { background: var(--control-bg-hover); }
+/* Hidden state (element currently OFF): fade the eye-off icon so "off" reads at a glance. */
+.vis-toggle[aria-pressed="true"] { opacity: 0.55; }
+.vis-toggle[aria-pressed="true"]:hover { opacity: 0.8; }
+/* When the parent tool is ARMED (accent fill), flip the icon + divider to the on-accent
+   colour so it stays legible over the accent background (sibling combinator on .is-active). */
+.floorplate-btn.is-active ~ .vis-toggle,
+.subtractive-btn.is-active ~ .vis-toggle,
+.mullions-btn.is-active ~ .vis-toggle,
+.type-btn.is-active ~ .vis-toggle {
+  color: var(--color-text-on-accent);
+  border-left-color: var(--color-text-on-accent);
+}
+/* Disabled in lockstep with the parent button (mirror the dimmed + not-allowed pattern). */
+.vis-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.vis-toggle:disabled:hover { background: transparent; }
+
+/* === CW TYPE chooser menu ===
+   The "CW Type" button opens a small popup ABOVE it (drop-up), anchored to the button via
+   a relative wrapper so it needs no JS positioning (reuses .cw-menu / .cw-menu__btn below).
+   The Floor Lines button no longer opens a menu, but its wrapper stays position:relative to
+   anchor the embedded visibility-toggle eye icon. */
 .cw-type-wrap,
 .floorlines-wrap { position: relative; display: inline-flex; }
 .cw-menu {
@@ -1158,12 +1281,8 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* The hint spans the canvas area, whose left edge is the right border of the left tool
-     panel. Centering normally would sit it under the top-right Projects minimap; shift the
-     whole block (text + arrow, spacing untouched) left by half the minimap's occupied band
-     so it lands in the centre zone between the panel's right border and the minimap's left
-     edge. */
-  transform: translateX(calc(-0.5 * (var(--mini-offset) + var(--mini-width))));
+  /* Panel is hidden by default so the canvas fills the full viewport; flex centering
+     already places the hint at the true horizontal midpoint of the screen. */
   animation: canvas-hint-in 220ms ease-out;
 }
 @keyframes canvas-hint-in { from { opacity: 0; } to { opacity: 1; } }
@@ -1456,6 +1575,17 @@ input[type="checkbox"] {
   color: var(--color-text-dim);
 }
 .statusbar__item { white-space: nowrap; }
+/* Contextual tool hint — sits just right of the X/Y readouts. Revives the old
+   accent status text style, coloured the themed blue (--statusbar-hint-color) and
+   used to coach new users on what the armed tool does. Slightly emphasised so it
+   stands apart from the neutral grey readouts. */
+.statusbar__hint {
+  color: var(--statusbar-hint-color);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .statusbar__sep {
   width: 1px;
   height: 60%;
@@ -1510,13 +1640,6 @@ input[type="checkbox"] {
   overflow-y: auto;        /* scroll the gallery when it overflows */
   min-height: 0;
   padding: var(--space-1);
-}
-
-.mini__empty {
-  font-size: var(--font-size-small);
-  color: var(--mini-stats-text);
-  line-height: 1.4;
-  padding: var(--space-2);
 }
 
 .mini__list {
