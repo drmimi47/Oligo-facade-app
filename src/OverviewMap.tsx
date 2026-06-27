@@ -89,8 +89,8 @@ export default function OverviewMap({
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
 
-  // --- Title-bar drag to reposition (clamped to the stage) — mirrors MiniWindow. ---
-  const onTitlePointerDown = (e: React.PointerEvent) => {
+  // --- Drag anywhere on the overview to reposition (clamped to the stage). ---
+  const onPointerDown = (e: React.PointerEvent) => {
     const win = winRef.current;
     const stage = stageRef.current;
     if (!win || !stage) return;
@@ -100,11 +100,11 @@ export default function OverviewMap({
     // Seed explicit position from the current rendered spot so the first move
     // doesn't jump from the CSS-anchored (bottom-left) location.
     setPos({ x: winRect.left - stageRect.left, y: winRect.top - stageRect.top });
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   };
 
-  const onTitlePointerMove = (e: React.PointerEvent) => {
+  const onPointerMove = (e: React.PointerEvent) => {
     const drag = dragRef.current;
     const win = winRef.current;
     const stage = stageRef.current;
@@ -120,9 +120,9 @@ export default function OverviewMap({
     setPos({ x, y });
   };
 
-  const onTitlePointerUp = (e: React.PointerEvent) => {
+  const onPointerUp = (e: React.PointerEvent) => {
     dragRef.current = null;
-    (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
   };
 
   // Keep the window inside the stage if it shrinks (e.g. resize) with a manual pos.
@@ -241,15 +241,18 @@ export default function OverviewMap({
     : {};
 
   return (
-    <div className="overview" ref={winRef} style={style} role="region" aria-label="Overview map">
-      {/* ===== DRAG HANDLE (slim grip strip; no label) ===== */}
-      <div
-        className="overview__titlebar"
-        onPointerDown={onTitlePointerDown}
-        onPointerMove={onTitlePointerMove}
-        onPointerUp={onTitlePointerUp}
-        aria-label="Drag to move overview"
-      />
+    <div
+      className="overview"
+      ref={winRef}
+      style={style}
+      role="region"
+      aria-label="Overview map — drag to reposition — double-click to reset position"
+      title="Drag to reposition — double-click to reset to default position"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onDoubleClick={() => setPos(null)}
+    >
       {/* ===== FIT-TO-VIEW SCENE + CURRENT-VIEW RECT ===== */}
       <div className="overview__body">
         <canvas ref={canvasRef} className="overview__canvas" />

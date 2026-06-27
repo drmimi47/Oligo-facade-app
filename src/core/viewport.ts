@@ -22,8 +22,8 @@ export interface Viewport {
 }
 
 export const defaultViewport = (width: number, height: number): Viewport => ({
-  // ~30px per unit gives a comfortable default working scale.
-  scale: 30,
+  // 10 px/ft is the default working scale on load and new project.
+  scale: 10,
   // Place model origin near the centre of the canvas.
   originX: width / 2,
   originY: height / 2,
@@ -69,10 +69,9 @@ export function pan(vp: Viewport, dxScreen: number, dyScreen: number): Viewport 
   return { ...vp, originX: vp.originX + dxScreen, originY: vp.originY + dyScreen };
 }
 
-// Interactive zoom limits. Min 0.25 px/ft lets the user zoom out to frame very
-// large footprints (a ~4000 ft extent fits in ~1000 px); max 2000 px/ft caps
-// zoom-in. These bound the MAIN canvas's pan/zoom and the default fit.
-const MIN_SCALE = 0.25;
+// Interactive zoom limits. Min 1 px/ft is the farthest the user can zoom out;
+// max 2000 px/ft caps zoom-in. These bound the MAIN canvas's pan/zoom and the default fit.
+const MIN_SCALE = 1;
 const MAX_SCALE = 2000;
 function clampScale(s: number): number {
   return Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));

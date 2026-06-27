@@ -14,8 +14,9 @@
  *   - Click a thumbnail        -> load that perimeter into the editor.
  *   - Drag a thumbnail preview -> orbit its 3D camera (rotate the massing).
  *   - Double-click the preview -> animate to a top-down (plan) view; again toggles back.
- *   - Rename (double-click name / pencil) -> inline edit, Enter/blur commits.
- *   - Delete (×)               -> remove that save.
+ *   - Drag a project name      -> reorder the project list.
+ *   - Rename (pencil ✎)        -> inline edit, Enter/blur commits.
+ *   - Delete (×)               -> remove that save (undoable via Ctrl+Z / Redo).
  *   - Drag the title bar       -> reposition the window (clamped to the stage).
  *   - Collapse/expand (▾/▸)    -> hide/show the gallery body.
  *
@@ -61,6 +62,8 @@ interface MiniWindowProps {
   onDuplicate: (id: string) => void;
   /** Rename a saved perimeter. */
   onRename: (id: string, name: string) => void;
+  /** Reorder: move the project at `from` index to `to` index. */
+  onReorder: (from: number, to: number) => void;
   /** Persist an edited geo-location onto a saved entry (from its Solar Study popup). */
   onLocationChange: (id: string, location: LocationInfo) => void;
   /** Persist edited solar settings (cardinal orientation + study set) onto a saved entry. */
@@ -69,6 +72,9 @@ interface MiniWindowProps {
   onSave: () => void;
   /** Gates the footer "+" — false when the sketch can't be saved (needs ≥2 vertices). */
   canSave: boolean;
+  /** Whether to SHOW the footer "+ Save" button at all. Saving a new sketch only
+   *  belongs to the Building Perimeter tab, so it's hidden in the elevation views. */
+  showSave: boolean;
   /** Bounds the window is dragged within (the stage size in CSS px). */
   stageRef: React.RefObject<HTMLElement>;
   /**
@@ -115,10 +121,12 @@ export default function MiniWindow({
   onDelete,
   onDuplicate,
   onRename,
+  onReorder,
   onLocationChange,
   onSolarChange,
   onSave,
   canSave,
+  showSave,
   stageRef,
   highlightEdge,
   highlightAsLine,
@@ -134,6 +142,14 @@ export default function MiniWindow({
   // entry's thumbnail are driven by it, so rotating either rotates both. Reset to
   // a clean 3/4 view each time a study opens so the two start in sync.
   const [solarCamera, setSolarCamera] = useState<Camera>(DEFAULT_CAMERA);
+  // Attention flash: triggered when the user clicks outside the Solar Study popup.
+  const [solarFlashing, setSolarFlashing] = useState(false);
+  const solarFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleSolarBackdrop = () => {
+    if (solarFlashTimer.current) clearTimeout(solarFlashTimer.current);
+    setSolarFlashing(true);
+    solarFlashTimer.current = setTimeout(() => setSolarFlashing(false), 400);
+  };
   // The ☀ button TOGGLES its study: clicking it while that entry's popup is open
   // closes it; otherwise it opens (resetting to a clean 3/4 camera). Clicking a
   // different entry's ☀ switches the open study to that entry.
@@ -149,6 +165,9 @@ export default function MiniWindow({
   // switch to explicit left/top coordinates (CSS px within the stage).
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  // Drag-to-reorder: which index is being dragged, and which index is the current drop target.
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
   const winRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
 
@@ -224,8 +243,8 @@ export default function MiniWindow({
         <button
           className="mini__iconbtn"
           onClick={() => setCollapsed((c) => !c)}
-          title={collapsed ? "Expand" : "Collapse"}
-          aria-label={collapsed ? "Expand" : "Collapse"}
+          title="Expand / collapse"
+          aria-label="Expand / collapse"
         >
           {collapsed ? "▸" : "▾"}
         </button>
@@ -238,7 +257,7 @@ export default function MiniWindow({
             <div className="mini__empty">No projects yet. Use ＋ below to save the current sketch.</div>
           ) : (
             <ul className="mini__list">
-              {saved.map((s) => (
+              {saved.map((s, i) => (
                 <Thumb
                   key={s.id}
                   saved={s}
@@ -266,6 +285,26 @@ export default function MiniWindow({
                   // height edits track in its preview immediately; others render
                   // their own stored snapshot.
                   livePerimeter={s.id === activeId ? livePerimeter : undefined}
+                  // Drag-to-reorder props
+                  isDragOver={overIdx === i && dragIdx !== null && dragIdx !== i}
+                  onNameDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    setDragIdx(i);
+                  }}
+                  onItemDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    if (i !== dragIdx) setOverIdx(i);
+                  }}
+                  onItemDrop={() => {
+                    if (dragIdx !== null && dragIdx !== i) onReorder(dragIdx, i);
+                    setDragIdx(null);
+                    setOverIdx(null);
+                  }}
+                  onItemDragEnd={() => {
+                    setDragIdx(null);
+                    setOverIdx(null);
+                  }}
                 />
               ))}
             </ul>
@@ -274,19 +313,23 @@ export default function MiniWindow({
       )}
 
       {/* ===== FOOTER: add the current sketch as a new saved preview =====
-          Pinned at the bottom and rendered ALWAYS (outside the collapse block) so
-          the "+" stays reachable even when the gallery is collapsed. */}
-      <div className="mini__footer">
-        <button
-          className="mini__addbtn"
-          onClick={onSave}
-          disabled={!canSave}
-          title={canSave ? "Save the current sketch as a new preview (Ctrl+S)" : "Draw at least 2 vertices to save"}
-          aria-label="Save current sketch as a new preview"
-        >
-          <span className="mini__addbtn-plus" aria-hidden="true">＋</span> Save
-        </button>
-      </div>
+          Pinned at the bottom and rendered (outside the collapse block) so the "+"
+          stays reachable even when the gallery is collapsed. Only shown in the Building
+          Perimeter tab (showSave) — saving a new sketch has no meaning in the elevation
+          views, so the footer is hidden there entirely. */}
+      {showSave && (
+        <div className="mini__footer">
+          <button
+            className="mini__addbtn"
+            onClick={onSave}
+            disabled={!canSave}
+            title="Save project"
+            aria-label="Save current sketch as a new preview"
+          >
+            <span className="mini__addbtn-plus" aria-hidden="true">＋</span> Save
+          </button>
+        </div>
+      )}
 
       {/* ===== SOLAR STUDY popup (opened from a row's ☀ button) =====
           Portalled into the STAGE (not nested in this window, which is
@@ -294,16 +337,20 @@ export default function MiniWindow({
           that positions/drags against the canvas area and is never clipped. */}
       {solarEntry && stageRef.current &&
         createPortal(
-          <SolarStudy
-            entry={solarEntry}
-            defaultHeight={defaultHeight}
-            onClose={() => setSolarId(null)}
-            onLocationChange={onLocationChange}
-            onSolarChange={onSolarChange}
-            camera={solarCamera}
-            onCameraChange={setSolarCamera}
-            stageRef={stageRef}
-          />,
+          <>
+            <div className="modal-backdrop" onClick={handleSolarBackdrop} />
+            <SolarStudy
+              entry={solarEntry}
+              defaultHeight={defaultHeight}
+              onClose={() => setSolarId(null)}
+              onLocationChange={onLocationChange}
+              onSolarChange={onSolarChange}
+              camera={solarCamera}
+              onCameraChange={setSolarCamera}
+              stageRef={stageRef}
+              isFlashing={solarFlashing}
+            />
+          </>,
           stageRef.current,
         )}
     </div>
@@ -337,10 +384,16 @@ interface ThumbProps {
   defaultHeight?: number;
   /** Live editor geometry to render INSTEAD of the stored snapshot (active entry only). */
   livePerimeter?: Perimeter;
+  /** True when this item is the current drag-over drop target. */
+  isDragOver: boolean;
+  onNameDragStart: (e: React.DragEvent) => void;
+  onItemDragOver: (e: React.DragEvent) => void;
+  onItemDrop: () => void;
+  onItemDragEnd: () => void;
 }
 
 /** One saved-perimeter row: a live thumbnail + name + stats + actions. */
-function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenSolar, camera: controlledCamera, onCameraChange, highlightEdge, highlightAsLine, heights, defaultHeight, livePerimeter }: ThumbProps) {
+function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenSolar, camera: controlledCamera, onCameraChange, highlightEdge, highlightAsLine, heights, defaultHeight, livePerimeter, isDragOver, onNameDragStart, onItemDragOver, onItemDrop, onItemDragEnd }: ThumbProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(saved.name);
@@ -534,11 +587,16 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
   };
 
   return (
-    <li className={`mini__item ${active ? "is-active" : ""}`}>
+    <li
+      className={`mini__item ${active ? "is-active" : ""} ${isDragOver ? "is-drag-over" : ""}`}
+      onDragOver={onItemDragOver}
+      onDrop={onItemDrop}
+      onDragEnd={onItemDragEnd}
+    >
       <button
         className="mini__thumb"
         onClick={onThumbClick}
-        title="Click to load · drag to rotate the 3D preview · double-click to toggle a top-down (plan) view"
+        title="Click to load — drag to rotate the 3D preview — double-click to toggle a top-down (plan) view"
       >
         <canvas
           ref={canvasRef}
@@ -569,12 +627,10 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
         ) : (
           <button
             className="mini__name"
+            draggable
             onClick={() => onLoad(saved)}
-            onDoubleClick={() => {
-              setDraft(saved.name);
-              setEditing(true);
-            }}
-            title="Click to load · double-click to rename"
+            onDragStart={onNameDragStart}
+            title="Click to load — drag to re-order"
           >
             {saved.name}
           </button>
@@ -589,7 +645,7 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
         <button
           className="mini__iconbtn"
           onClick={() => onOpenSolar(saved.id)}
-          title="Solar study — open/close a larger view"
+          title="Solar study"
           aria-label="Solar study"
         >
           ☀
@@ -608,7 +664,7 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
         <button
           className="mini__iconbtn"
           onClick={() => onDuplicate(saved.id)}
-          title="Duplicate this project (perimeter, elevations, framing — everything)"
+          title="Duplicate project"
           aria-label="Duplicate"
         >
           ⧉
@@ -616,8 +672,8 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
         <button
           className="mini__iconbtn mini__iconbtn--danger"
           onClick={() => onDelete(saved.id)}
-          title="Delete this save"
-          aria-label="Delete"
+          title="Delete project"
+          aria-label="Delete project"
         >
           ×
         </button>

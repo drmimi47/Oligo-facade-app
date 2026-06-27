@@ -185,6 +185,14 @@ export interface RenderState {
   drawing: boolean;
   /** Whether to draw the cursor-following rubber-band segment. */
   rubberBand: boolean;
+  /** REVIT-STYLE DIMENSION ENTRY (perimeter draw): when the user is typing an exact
+   *  segment length, the rubber band ends HERE — the last vertex plus the typed length
+   *  along the cursor direction — instead of at the cursor. null when not entering a
+   *  dimension or the direction is undefined (then it falls back to the cursor). */
+  dimPreview?: Point | null;
+  /** The raw dimension string being typed (e.g. "12."), shown verbatim as the rubber
+   *  band's length label (accented) so partial input is visible. null when none. */
+  dimText?: string | null;
   /** Index of selected vertex, or -1. */
   selectedVertex: number;
   /** Index of hovered vertex, or -1. */
@@ -564,11 +572,15 @@ export function render(
     drawHandles(ctx, state.viewport, v[state.handleVertex], tk);
   }
 
-  // Rubber-band: last vertex -> cursor, with live length/angle label.
+  // Rubber-band: last vertex -> cursor, with live length/angle label. While a
+  // dimension is being typed, the band ends at the typed length along the cursor
+  // direction (dimPreview) and the label shows the raw typed string, accented.
   if (state.rubberBand && state.cursorModel && v.length >= 1) {
     const last = v[v.length - 1];
+    const dimming = state.dimText != null && state.dimText !== "";
+    const end = state.dimPreview ?? state.cursorModel;
     const a = toScreen(state.viewport, last);
-    const b = toScreen(state.viewport, state.cursorModel);
+    const b = toScreen(state.viewport, end);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
@@ -578,7 +590,15 @@ export function render(
     ctx.stroke();
     ctx.setLineDash([]);
 
-    drawSegmentLabel(ctx, canvas, a, b, distance(last, state.cursorModel), angleDeg(last, state.cursorModel));
+    drawSegmentLabel(
+      ctx,
+      canvas,
+      a,
+      b,
+      distance(last, end),
+      angleDeg(last, end),
+      dimming ? state.dimText! : undefined,
+    );
   }
 
   // Insertion preview marker (edit mode).
@@ -694,12 +714,22 @@ function drawSegmentLabel(
   b: Point,
   length: number,
   angle: number,
+  // When set, the length portion shows this raw string (with a foot tick) instead of
+  // the formatted measurement, and the label is drawn ACCENTED — used for the live
+  // Revit-style typed-dimension entry so it reads as an active input, not a readout.
+  lengthOverride?: string,
 ): void {
-  const text = `${fmtFeetPrime(length)}  ∠${angle.toFixed(1)}°`;
+  const lenStr = lengthOverride != null ? `${lengthOverride}′` : fmtFeetPrime(length);
+  const text = `${lenStr}  ∠${angle.toFixed(1)}°`;
   const midX = (a.x + b.x) / 2;
   const midY = (a.y + b.y) / 2;
-  const fg = cssVar(canvas, "--label-text", "#1c2530");
-  const bgc = cssVar(canvas, "--label-bg", "rgba(255,255,255,0.88)");
+  const accent = lengthOverride != null;
+  const fg = accent
+    ? cssVar(canvas, "--dim-input-text", "#ffffff")
+    : cssVar(canvas, "--label-text", "#1c2530");
+  const bgc = accent
+    ? cssVar(canvas, "--dim-input-bg", "rgba(36,110,234,0.92)")
+    : cssVar(canvas, "--label-bg", "rgba(255,255,255,0.88)");
   ctx.font = cssVar(canvas, "--label-font", "12px ui-monospace, monospace");
   const padding = 4;
   const w = ctx.measureText(text).width;

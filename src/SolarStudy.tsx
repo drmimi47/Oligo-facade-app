@@ -65,6 +65,8 @@ interface SolarStudyProps {
   onCameraChange: (camera: Camera) => void;
   /** Bounds the popup is dragged within (the canvas stage in CSS px). */
   stageRef: React.RefObject<HTMLElement>;
+  /** When true, plays the attention-flash animation (user clicked outside). */
+  isFlashing?: boolean;
 }
 
 /** Resolve an entry's solar settings, inheriting a geocoded latitude/longitude when
@@ -78,7 +80,7 @@ function resolveSettings(entry: SavedPerimeter): SolarSettings {
   return base;
 }
 
-export default function SolarStudy({ entry, defaultHeight, onClose, onLocationChange, onSolarChange, camera, onCameraChange, stageRef }: SolarStudyProps) {
+export default function SolarStudy({ entry, defaultHeight, onClose, onLocationChange, onSolarChange, camera, onCameraChange, stageRef, isFlashing }: SolarStudyProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const winRef = useRef<HTMLDivElement>(null);
   // Position: null means "centred by CSS"; once dragged we switch to explicit px.
@@ -276,7 +278,7 @@ export default function SolarStudy({ entry, defaultHeight, onClose, onLocationCh
   const style: React.CSSProperties = pos ? { left: pos.x, top: pos.y, transform: "none" } : {};
 
   return (
-    <div className="solar" ref={winRef} style={style} role="dialog" aria-label="Solar Study">
+    <div className={`solar${isFlashing ? " solar--flash" : ""}`} ref={winRef} style={style} role="dialog" aria-label="Solar Study">
       {/* ===== TITLE BAR (drag handle) ===== */}
       <div
         className="solar__titlebar"
@@ -295,7 +297,7 @@ export default function SolarStudy({ entry, defaultHeight, onClose, onLocationCh
         <canvas
           ref={canvasRef}
           className="solar__canvas"
-          title="Drag to rotate · double-click for an aerial (top-down) view"
+          title="Drag to rotate — double-click for an aerial (top-down) view"
           onPointerDown={onCanvasPointerDown}
           onPointerMove={onCanvasPointerMove}
           onPointerUp={onCanvasPointerUp}
@@ -383,7 +385,7 @@ export default function SolarStudy({ entry, defaultHeight, onClose, onLocationCh
                 step={0.25}
                 value={settings.latitude}
                 onChange={(e) => update({ latitude: Math.max(-90, Math.min(90, Number(e.target.value))) })}
-                title="Site latitude (° N). Temporary default: Omaha, NE — replaced by the geocoded address (Mapbox) later."
+                title="Site latitude (° N) — defaults to Omaha, NE"
               />
               <span className="solar__readout solar__readout--muted" title="Site coordinates feeding the sun path">
                 {settings.latitude >= 0 ? "N" : "S"} · sun {altDeg >= 0 ? `alt ${altDeg}° · az ${azDeg}°` : "below horizon"}
@@ -400,7 +402,7 @@ export default function SolarStudy({ entry, defaultHeight, onClose, onLocationCh
             type="text"
             value={address}
             placeholder="Address (e.g. 123 Main St, City)"
-            title="Address for the solar study — inherited from the sketch's location; edit to update it."
+            title="Address for the solar study — inherited from the sketch's location; edit to update it"
             onChange={(e) => commitAddress(e.target.value)}
           />
         </div>
