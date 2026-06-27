@@ -93,6 +93,23 @@
   --unravel-clean-fill: #ffffff; /* CLEAN view: opaque white glass fill behind the framing (centerlines / floor plates / dimensions hidden) */
   --unravel-edge-select: #e5484d; /* Assembly phase: the focused cell's top/right/bottom/left EDGE under the cursor, stroked red to mark it as selected (one edge at a time) */
   --unravel-mullion-color: #4f8aa0; /* Mullions tool (Stick system): the paired mullion-face lines drawn to either side (±offset) of each grid line */
+
+  /* === EXPORT SELECTION + POPUP ===
+     The "Export" button (nav header, between Smart Search and Settings) arms a wall-
+     selection MARQUEE in the unravel views. Selected panels are tinted/outlined in a
+     distinct GREEN (clearly different from the red hover + blue panel tint), and the
+     live rubber-band marquee uses the same green dashed. Releasing opens the export
+     popup (chrome below reuses the --mini-* / Solar-Study family). */
+  --export-select-fill: rgba(31,157,107,0.22);   /* Selected panel fill (canvas) */
+  --export-select-stroke: #1f9d6b;               /* Selected panel outline (canvas) */
+  --export-select-width: 2.5;                     /* Selected panel outline width (px) */
+  --export-marquee-fill: rgba(31,157,107,0.10);  /* Live marquee box fill (canvas) */
+  --export-marquee-stroke: #1f9d6b;              /* Live marquee box dashed stroke (canvas) */
+  --export-marquee-width: 1.5;                    /* Marquee stroke width (px) */
+  --export-marquee-dash: 5;                       /* Marquee dash length (px) */
+  --export-popup-width: 320px;                    /* Export dialog width */
+  --export-preview-height: 220px;                 /* Export dialog 3D preview height */
+  --export-preview-bg: var(--mini-canvas-bg, #0c1218); /* 3D preview canvas background */
   /* SHADOWS view ("View" button): a 2.5D presentation that builds on CLEAN (white glass) and
      casts a crisp, hard-edged drop shadow from every framing bar onto the glass beside it. */
   --frame-shadow-color: rgba(17,22,28,0.30); /* SHADOWS view: hard drop-shadow fill (no blur) cast by each raised framing bar onto the glass — never on the frame infill */
@@ -457,6 +474,11 @@
   --unravel-cell-highlight-fill: rgba(127,178,255,0.24); /* Hovered individual CELL fill (Panels phase) — accent blue */
   --unravel-edge-select: #ff6166; /* Assembly phase: hovered focused-cell edge — brighter red for dark mode */
   --unravel-mullion-color: #6fb0c6; /* Mullions tool: paired mullion-face lines — lifted for dark mode */
+  /* Export selection / marquee — a brighter green so it pops on the dark canvas. */
+  --export-select-fill: rgba(46,204,143,0.24);
+  --export-select-stroke: #2ecc8f;
+  --export-marquee-fill: rgba(46,204,143,0.12);
+  --export-marquee-stroke: #2ecc8f;
   /* Material-ID cell view — the vivid opaque segmentation palette (S100 / L50 / opaque)
      reads identically on any canvas, so the dark theme keeps the same values as the base. */
   /* Orientation heatmap — the vivid opaque thermal ramp reads identically on any canvas,
@@ -740,6 +762,40 @@ body {
   opacity: 0.6;
 }
 
+/* EXPORT button — a bordered action button in .nav-header__right, between the Smart
+   Search bar and the Settings gear. Reads as an action (border, like the gear) rather
+   than a tab; turns the accent fill while the wall-selection marquee is armed (is-active)
+   and dims with the shared disabled pattern in the Building Perimeter tab. */
+.nav-header__export {
+  height: calc(var(--nav-header-height) - 12px);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--nav-header-border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--nav-btn-color);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+  user-select: none;
+  white-space: nowrap;
+}
+.nav-header__export:hover:not(:disabled):not(.is-active) {
+  background: var(--nav-btn-bg-hover);
+  color: var(--color-text);
+}
+.nav-header__export.is-active {
+  background: var(--nav-btn-bg-active);
+  color: var(--nav-btn-color-active);
+  border-color: transparent;
+}
+.nav-header__export:disabled {
+  color: var(--nav-btn-color-disabled);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* === LEFT TOOL PANEL === */
 .panel {
   grid-column: 1;
@@ -935,6 +991,21 @@ input[type="checkbox"] {
   position: absolute;
   top: var(--space-3);
   left: var(--space-3);
+  z-index: 50;
+  display: flex;
+  gap: var(--space-1);
+}
+
+/* === TOP-RIGHT TOOL CLUSTER (Render · Constraint) ===
+   Mirrors .history-controls but anchored to the RIGHT, parked just LEFT of the
+   Projects minimap (which sits at right:--mini-offset and is --mini-width wide) while
+   staying on the SAME horizontal line as the top-left undo/redo cluster (same top
+   inset). The buttons reuse the .history-btn look so the whole top row reads as one
+   family. (The minimap is draggable, so this anchors to its DEFAULT spot.) */
+.topright-tools {
+  position: absolute;
+  top: var(--space-3);
+  right: calc(var(--mini-offset) + var(--mini-width) + var(--space-2));
   z-index: 50;
   display: flex;
   gap: var(--space-1);
@@ -1901,6 +1972,111 @@ input[type="checkbox"] {
   gap: var(--space-2);
   padding: var(--space-2);
 }
+
+/* === EXPORT POPUP ===
+   Dialog opened on a non-empty marquee release. Reuses the Solar Study / mini-window
+   chrome (--mini-* surfaces, border, shadow, blur) so it reads as a sibling popup;
+   only the body (3D preview of the selected walls + the three export targets) differs.
+   Centred in the stage until dragged (then inline left/top + transform:none take over,
+   set in the component). */
+.export-popup {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--export-popup-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--mini-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  overflow: hidden;
+  z-index: 100;                /* above the modal backdrop (z 99) */
+  backdrop-filter: blur(2px);
+}
+.export-popup__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--control-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  background: var(--mini-titlebar-bg);
+  border-bottom: 1px solid var(--mini-border);
+  cursor: move;                /* advertise drag-to-move */
+  user-select: none;
+  touch-action: none;
+  flex: 0 0 auto;
+}
+.export-popup__title {
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--mini-title-text);
+}
+.export-popup__close {
+  border: none;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-lg);
+  line-height: 1;
+  width: var(--control-height);
+  height: var(--control-height);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.export-popup__close:hover { background: var(--color-danger-wash); color: var(--color-danger); }
+.export-popup__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+/* 3D preview of ONLY the selected walls (drag to orbit). */
+.export-popup__preview {
+  width: 100%;
+  height: var(--export-preview-height);
+  display: block;
+  background: var(--export-preview-bg);
+  border: 1px solid var(--mini-border);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  touch-action: none;
+}
+.export-popup__preview:active { cursor: grabbing; }
+.export-popup__hint {
+  font-size: var(--font-size-small);
+  color: var(--color-text-dim);
+  line-height: 1.35;
+}
+/* The three export targets, stacked. */
+.export-popup__targets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.export-popup__target {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  background: var(--control-bg);
+  color: var(--control-text);
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms, border-color 120ms;
+}
+.export-popup__target:hover { background: var(--control-bg-hover); border-color: var(--color-accent); }
+.export-popup__target-app { font-size: var(--font-size-base); font-weight: 600; }
+.export-popup__target-note { font-size: var(--font-size-small); color: var(--color-text-dim); }
+/* Attention flash — reuse the shared popup pulse (chrome only) when the user clicks
+   outside the dialog (the component toggles .is-flashing). */
+.export-popup.is-flashing { animation: popup-shadow-flash 360ms linear; }
+.export-popup.is-flashing .export-popup__titlebar { animation: popup-titlebar-flash 360ms linear; }
 
 /* Settings is narrower than the Solar Study popup it borrows chrome from. */
 .settings { width: var(--settings-width); }

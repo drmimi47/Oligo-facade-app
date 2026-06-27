@@ -238,6 +238,19 @@ export interface RenderState {
    */
   hoveredUnravelTop?: number;
   /**
+   * UNRAVEL view only: set of ORIGINAL edge indices currently SELECTED for export
+   * (via the Export marquee). Selected panels are drawn in the distinct export
+   * selection fill/stroke so it's clear which walls will be exported. Empty/omitted
+   * = no selection.
+   */
+  exportSelection?: ReadonlySet<number> | null;
+  /**
+   * UNRAVEL view only: the live export-selection MARQUEE rectangle in MODEL space
+   * (the two drag corners), drawn as a dashed rubber-band while the user is dragging
+   * out a selection. null/omitted when not marquee-dragging.
+   */
+  marquee?: { x0: number; y0: number; x1: number; y1: number } | null;
+  /**
    * UNRAVEL view (Panels phase) only: the model-space rectangle of the single grid
    * CELL the cursor is hovering within the focused panel, or null/undefined for none.
    * Drawn as a tinted fill so a subdivided panel reads as a set of individually
@@ -471,6 +484,15 @@ export function render(
     // Mullions tool: the paired mullion-face lines drawn ±offset around each grid line.
     unravelMullion: cssVar(canvas, "--unravel-mullion-color", "#5b94a8"),
     highlight: cssVar(canvas, "--unravel-highlight-color", "#d23154"),
+    // Export marquee selection: the highlight fill/stroke for selected panels and the
+    // dashed rubber-band rectangle while dragging out a selection.
+    exportSelectFill: cssVar(canvas, "--export-select-fill", "rgba(31,157,107,0.22)"),
+    exportSelectStroke: cssVar(canvas, "--export-select-stroke", "#1f9d6b"),
+    exportSelectW: cssNum(canvas, "--export-select-width", 2.5),
+    marqueeFill: cssVar(canvas, "--export-marquee-fill", "rgba(31,157,107,0.10)"),
+    marqueeStroke: cssVar(canvas, "--export-marquee-stroke", "#1f9d6b"),
+    marqueeW: cssNum(canvas, "--export-marquee-width", 1.5),
+    marqueeDash: cssNum(canvas, "--export-marquee-dash", 5),
     vertexR: cssNum(canvas, "--vertex-radius", 4),
     handleR: cssNum(canvas, "--handle-radius", 3.5),
     segmentW: cssNum(canvas, "--segment-width", 1.5),
@@ -530,8 +552,13 @@ export function render(
       state.centerlinesHidden ?? false,
       state.framingHidden ?? false,
       state.dimensionsHidden ?? false,
+      state.exportSelection ?? null,
       tk,
     );
+    // Live export-selection MARQUEE (dashed rubber-band) — drawn right after the panels
+    // so it shows in every unravel sub-view, including the boundaries-only overview that
+    // returns just below. The selected-panel highlight itself is drawn inside drawUnravel.
+    if (state.marquee) drawMarquee(ctx, state.viewport, state.marquee, tk);
     // OVERVIEW boundaries-only mode draws nothing but the panel rectangles — no
     // floor plates (they are an elevation overlay, not a panel boundary).
     if (state.unravelBoundariesOnly) return;
@@ -903,6 +930,35 @@ function drawHighlightEdge(
  * Heights are PER-PANEL: each `UnravelDraw` carries its own resolved height, so
  * every rectangle can rise to a different y = height.
  */
+/**
+ * Draw the live export-selection MARQUEE: a dashed rubber-band rectangle between
+ * the two drag corners (given in MODEL space, converted to screen here so it pans/
+ * zooms with the strip). Faint fill + dashed export-selection stroke so it reads as
+ * a transient selection box over the unravel rectangles.
+ */
+function drawMarquee(
+  ctx: CanvasRenderingContext2D,
+  vp: Viewport,
+  rect: { x0: number; y0: number; x1: number; y1: number },
+  tk: { marqueeFill: string; marqueeStroke: string; marqueeW: number; marqueeDash: number },
+): void {
+  const a = toScreen(vp, { x: rect.x0, y: rect.y0 });
+  const b = toScreen(vp, { x: rect.x1, y: rect.y1 });
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const w = Math.abs(a.x - b.x);
+  const h = Math.abs(a.y - b.y);
+  ctx.fillStyle = tk.marqueeFill;
+  ctx.fillRect(x, y, w, h);
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.strokeStyle = tk.marqueeStroke;
+  ctx.lineWidth = tk.marqueeW;
+  ctx.setLineDash([tk.marqueeDash, tk.marqueeDash]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 function drawUnravel(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -937,6 +993,8 @@ function drawUnravel(
   framingHidden: boolean,
   /** Dim visibility-toggle: when true, all dimension labels are suppressed (no view auto-hides them). */
   dimensionsHidden: boolean,
+  /** Export marquee: set of selected ORIGINAL edge indices to draw in the export-selection colours, or null. */
+  exportSelection: ReadonlySet<number> | null,
   tk: {
     unravelLine: string;
     unravelCurve: string;
@@ -961,6 +1019,9 @@ function drawUnravel(
     orientAlpha: number;
     unravelMullion: string;
     highlight: string;
+    exportSelectFill: string;
+    exportSelectStroke: string;
+    exportSelectW: number;
     segmentW: number;
     highlightW: number;
     unravelTopW: number;
@@ -978,6 +1039,9 @@ function drawUnravel(
     const topL = toScreen(vp, { x: seg.x0, y: h });
     // In OVERVIEW boundaries-only mode hover/selection emphasis is suppressed.
     const hovered = !boundariesOnly && seg.index === hoveredEdge;
+    // Export marquee selection: drawn in the distinct export-selection colours. Hover
+    // still wins visually (it's the transient pointer feedback) so the two never fight.
+    const isSelected = !boundariesOnly && !!exportSelection && exportSelection.has(seg.index);
 
     // Screen-space rectangle (model +Y up flips to screen -Y, so topL.y < baseL.y).
     const x = baseL.x;
@@ -993,8 +1057,14 @@ function drawUnravel(
     const presentation = clean || shadows;
 
     // Fill. PRESENTATION views fill the panel opaque WHITE (the glass behind the framing);
-    // otherwise the translucent panel tint (or the warm hover fill).
-    ctx.fillStyle = presentation ? tk.unravelCleanFill : hovered ? tk.unravelHighlightFill : tk.unravelRectFill;
+    // otherwise hover, then export-selection, then the translucent panel tint.
+    ctx.fillStyle = presentation
+      ? tk.unravelCleanFill
+      : hovered
+        ? tk.unravelHighlightFill
+        : isSelected
+          ? tk.exportSelectFill
+          : tk.unravelRectFill;
     ctx.fillRect(x, y, w, rectH);
 
     // MATERIAL-ID view: tint each grid cell by its SHAPE colour. Drawn over the base
@@ -1050,12 +1120,21 @@ function drawUnravel(
       ctx.fillRect(Math.min(c0.x, c1.x), Math.min(c0.y, c1.y), Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
     }
 
-    // Outline. Hovered rect uses the highlight colour + thicker stroke; curved
-    // edges are dashed regardless so their arc-length origin stays distinguishable.
+    // Outline. Hovered rect uses the highlight colour + thicker stroke; a selected
+    // (but not hovered) rect uses the export-selection stroke; curved edges are dashed
+    // regardless so their arc-length origin stays distinguishable.
     ctx.beginPath();
     ctx.rect(x, y, w, rectH);
-    ctx.strokeStyle = hovered ? tk.highlight : shadows ? tk.frameMonoOutline : seg.curved ? tk.unravelCurve : tk.unravelLine;
-    ctx.lineWidth = hovered ? tk.highlightW : tk.segmentW;
+    ctx.strokeStyle = hovered
+      ? tk.highlight
+      : isSelected
+        ? tk.exportSelectStroke
+        : shadows
+          ? tk.frameMonoOutline
+          : seg.curved
+            ? tk.unravelCurve
+            : tk.unravelLine;
+    ctx.lineWidth = hovered ? tk.highlightW : isSelected ? tk.exportSelectW : tk.segmentW;
     if (seg.curved) ctx.setLineDash([6, 4]);
     ctx.stroke();
     ctx.setLineDash([]);

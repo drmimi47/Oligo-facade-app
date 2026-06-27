@@ -70,6 +70,7 @@ import {
 } from "./core/savedPerimeters";
 import { cloneSolarSettings, defaultSolarSettings, type SolarSettings } from "./core/solar";
 import MiniWindow from "./MiniWindow";
+import ExportPopup from "./ExportPopup";
 import OverviewMap from "./OverviewMap";
 import Settings from "./Settings";
 
@@ -443,6 +444,25 @@ export default function PolylineTool() {
   // visibility once the feature renders something).
   const [typeOn, setTypeOn] = useState(false);
   const [typeVisible, setTypeVisible] = useState(true);
+  // RENDER / CONSTRAINT — two SCAFFOLDED top-row buttons (no behaviour yet) that sit
+  // just left of the Projects minimap, in line with the top-left undo/redo cluster.
+  // They toggle blue/white like the other tool buttons and are only clickable outside
+  // the Building Perimeter tab (i.e. in the unravel views, `unravelOn`).
+  const [renderOn, setRenderOn] = useState(false);
+  const [constraintOn, setConstraintOn] = useState(false);
+  // --- EXPORT (select walls -> download CAD geometry) ---
+  // When armed, a left-drag in the unravel view sweeps a MARQUEE that selects the
+  // panels (walls) it intersects; releasing with a non-empty selection opens the
+  // export popup. Mutually exclusive with the other armed tools. Unravel-only.
+  const [exportSelectMode, setExportSelectMode] = useState(false);
+  // ORIGINAL edge indices currently selected (highlighted on the canvas). Persists
+  // after release so the user sees what they exported until they reselect / leave.
+  const [exportSelection, setExportSelection] = useState<Set<number>>(() => new Set());
+  // Live marquee rectangle in MODEL space while dragging a selection, else null.
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  // The selection the export popup is open for (null = popup closed). Snapshotted
+  // on release so editing the live selection afterwards doesn't mutate the dialog.
+  const [exportPopup, setExportPopup] = useState<Set<number> | null>(null);
   // Per-edge mullion HALF-WIDTH offsets (feet), set by dragging a grid line with the
   // Mullions tool (Stick system). V = applied to every vertical grid line of a panel,
   // H = every horizontal one. Each grid line renders as a pair of faces at ±offset.
@@ -658,7 +678,8 @@ export default function PolylineTool() {
         all: boolean;
       }
     | { kind: "erase"; collected: EraseTarget[]; last: Point }
-    | { kind: "eraseVertex"; collected: number[]; edges: number[]; last: Point };
+    | { kind: "eraseVertex"; collected: number[]; edges: number[]; last: Point }
+    | { kind: "marquee"; startModel: Point };
   const dragRef = useRef<Drag | null>(null);
   // Timestamp (performance.now) of the last forward layer drill, so a rapid second
   // click (e.g. a habitual double-click) within DRILL_COOLDOWN_MS is ignored and one
@@ -1425,6 +1446,10 @@ export default function PolylineTool() {
     setCwMenuOpen(false);
     setViewMenuOpen(false);
     setStatsMenuOpen(false);
+    // Arming any cluster tool (each calls this first) also disarms the Export-select
+    // tool, so only one tool/mode is ever active. Re-armed last by toggleExportSelect.
+    setExportSelectMode(false);
+    setMarquee(null);
   }, []);
 
   // Disarm EVERY armed cluster tool (Floor plate · Centerlines · Eraser · Framing)
@@ -1447,7 +1472,56 @@ export default function PolylineTool() {
     setCellEdgeHover(null);
     setCellFrameDraft(null);
     setTypeOn(false);
+    // Menu opens (which call this) also disarm the Export-select tool.
+    setExportSelectMode(false);
+    setMarquee(null);
   }, []);
+
+  /**
+   * Which panels does an export MARQUEE rectangle (model space) intersect? A panel
+   * occupies [min(x0,x1), max(x0,x1)] on x and [0, height] on y; selection is a
+   * standard AABB overlap test (touching counts). Returns the set of ORIGINAL edge
+   * indices hit — empty when nothing overlaps or there's no unravel layout.
+   */
+  const panelsInMarquee = useCallback(
+    (rect: { x0: number; y0: number; x1: number; y1: number }): Set<number> => {
+      const out = new Set<number>();
+      const segs = unravelResult?.segments;
+      if (!segs) return out;
+      const mx0 = Math.min(rect.x0, rect.x1);
+      const mx1 = Math.max(rect.x0, rect.x1);
+      const my0 = Math.min(rect.y0, rect.y1);
+      const my1 = Math.max(rect.y0, rect.y1);
+      for (const s of segs) {
+        const px0 = Math.min(s.x0, s.x1);
+        const px1 = Math.max(s.x0, s.x1);
+        const py1 = Math.max(effectiveHeight(s.index), 0);
+        // Non-overlap on either axis => not selected (panel base is y = 0).
+        if (mx1 < px0 || mx0 > px1 || my1 < 0 || my0 > py1) continue;
+        out.add(s.index);
+      }
+      return out;
+    },
+    [unravelResult, effectiveHeight],
+  );
+
+  /**
+   * Toggle the Export selection tool. Arming it disarms every other tool / menu so
+   * only one is active at a time; disarming clears any live marquee + selection.
+   * (closeAllMenus / disarmClusterTools also clear exportSelectMode, so we re-arm it
+   * LAST — the final write wins within React's batch.)
+   */
+  const toggleExportSelect = useCallback(() => {
+    if (exportSelectMode) {
+      setExportSelectMode(false);
+      setMarquee(null);
+      setExportSelection(new Set());
+      return;
+    }
+    disarmClusterTools();
+    closeAllMenus();
+    setExportSelectMode(true);
+  }, [exportSelectMode, disarmClusterTools, closeAllMenus]);
 
   // --- CW TYPE (curtain-wall system) + MULLIONS ---
   // "CW Type" opens a small two-option menu (Stick / Unitized). Picking one stores the
@@ -2180,6 +2254,15 @@ export default function PolylineTool() {
       // rectangle can be dragged to stretch THAT panel's height.
       if (unravelOn) {
         const mu = toModel(viewport, sx, sy); // raw model point (no draw snap/constrain)
+        // EXPORT tool armed: start a selection MARQUEE instead of any tool / resize /
+        // navigation. The drag sweeps a box that selects the panels it intersects.
+        if (exportSelectMode) {
+          dragRef.current = { kind: "marquee", startModel: mu };
+          setMarquee({ x0: mu.x, y0: mu.y, x1: mu.x, y1: mu.y });
+          setExportSelection(new Set()); // a fresh sweep clears the prior selection
+          canvasRef.current?.setPointerCapture(e.pointerId);
+          return;
+        }
         // SUBTRACTIVE division tool: while armed, a press on the SELECTED panel
         // commits an EQUAL-COLUMN split — the same even subdivision the hover
         // recommendation previews (N equal-width columns chosen by the cursor's
@@ -2545,6 +2628,9 @@ export default function PolylineTool() {
       unravelGap,
       unravelHeights,
       unravelHeight,
+      // Export tool: a stale closure (exportSelectMode === false) would never start the
+      // selection marquee after arming Export.
+      exportSelectMode,
     ],
   );
 
@@ -2565,6 +2651,17 @@ export default function PolylineTool() {
           drag.moved = true;
         }
         setViewport((vp) => pan(vp, dx, dy));
+        return;
+      }
+
+      // Export marquee drag: grow the selection rectangle to the cursor and live-
+      // update which panels it intersects. Raw model point (no draw snap/constrain).
+      if (drag?.kind === "marquee") {
+        const mu = toModel(viewport, sx, sy);
+        setCursorModel(mu);
+        const rect = { x0: drag.startModel.x, y0: drag.startModel.y, x1: mu.x, y1: mu.y };
+        setMarquee(rect);
+        setExportSelection(panelsInMarquee(rect));
         return;
       }
 
@@ -2897,6 +2994,8 @@ export default function PolylineTool() {
       // Framing tool (Unitized) hover/drag reads these.
       nearestCellEdge,
       cellInsetForPoint,
+      // Export marquee drag recomputes the selected panels live as the box grows.
+      panelsInMarquee,
     ],
   );
 
@@ -2904,6 +3003,26 @@ export default function PolylineTool() {
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       canvasRef.current?.releasePointerCapture(e.pointerId);
       const drag = dragRef.current;
+      // Export marquee release: finalise the selection from the drag's final corner
+      // (computed fresh from the event, so no reliance on async state) and, if any
+      // walls were caught, open the export popup and disarm the select tool.
+      if (drag?.kind === "marquee") {
+        dragRef.current = null;
+        setMarquee(null);
+        const canvas = canvasRef.current;
+        let sel = new Set<number>();
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const mu = toModel(viewport, e.clientX - rect.left, e.clientY - rect.top);
+          sel = panelsInMarquee({ x0: drag.startModel.x, y0: drag.startModel.y, x1: mu.x, y1: mu.y });
+        }
+        setExportSelection(sel);
+        if (sel.size > 0) {
+          setExportPopup(sel);
+          setExportSelectMode(false); // tool's job is done; disarm like a one-shot
+        }
+        return;
+      }
       // A plain click in Arc mode (no handle pulled) auto-curves the segment
       // that was just committed (between the previous vertex and the new one).
       if (drag?.kind === "drawHandle" && !drag.moved && curveType === "arc" && drag.index >= 1) {
@@ -2992,7 +3111,9 @@ export default function PolylineTool() {
       dragRef.current = null;
       setActiveDrawHandle(-1);
     },
-    [curveType, unravelResult, divideDraft, commitDivisions, commitDividersH, commitEraseLines, mullionDraft, cellFrameDraft, cellShapeColors, cellsForEdge, flushHistory, recordHistory],
+    [curveType, unravelResult, divideDraft, commitDivisions, commitDividersH, commitEraseLines, mullionDraft, cellFrameDraft, cellShapeColors, cellsForEdge, flushHistory, recordHistory,
+      // Export marquee release resolves the final corner via viewport and selects panels.
+      viewport, panelsInMarquee],
   );
 
   const onDoubleClick = useCallback(
@@ -3478,6 +3599,17 @@ export default function PolylineTool() {
           setMode("edit");
         }
       } else if (e.key === "Escape") {
+        // The export popup owns Esc while open (its own capture listener closes it);
+        // don't let the canvas Esc actions (zoom-out, etc.) also fire underneath it.
+        if (exportPopup) return;
+        // Esc cancels an armed Export-select tool (and any in-progress marquee).
+        if (exportSelectMode) {
+          setExportSelectMode(false);
+          setMarquee(null);
+          setExportSelection(new Set());
+          (document.activeElement as HTMLElement)?.blur?.();
+          return;
+        }
         // Esc closes the Settings popup first of all, then the Statistics menu, the
         // View menu, the Floor Lines menu, the CW Type menu, disarms the Mullions tool, and so on.
         if (settingsOpen) {
@@ -3622,6 +3754,8 @@ export default function PolylineTool() {
     dimInput,
     commitDimVertex,
     settingsOpen,
+    exportSelectMode,
+    exportPopup,
   ]);
 
   // CW-TYPE GATE for the bottom-left cluster + Eraser. Floor Lines, Centerlines,
@@ -3905,6 +4039,10 @@ export default function PolylineTool() {
       unravel: unravelDraws2d,
       hoveredUnravelEdge,
       hoveredUnravelTop,
+      // Export selection highlight + live marquee — only meaningful in the unravel
+      // view, so gate on it (the renderer also only reads them there).
+      exportSelection: unravelOn ? exportSelection : null,
+      marquee: unravelOn ? marquee : null,
       // Per-cell hover highlight (Panels phase): the model-space rectangle of the
       // grid cell under the cursor, or null. Drawn tinted so the panel reads as a
       // set of individually navigable cells.
@@ -3973,6 +4111,9 @@ export default function PolylineTool() {
     unravelDraws2d,
     hoveredUnravelEdge,
     hoveredUnravelTop,
+    unravelOn,
+    exportSelection,
+    marquee,
     focusedPanel,
     // Per-cell hover highlight (Panels phase): repaint as the hovered cell changes.
     focusedCell,
@@ -4181,6 +4322,19 @@ export default function PolylineTool() {
   useEffect(() => {
     if (!canType && typeOn) setTypeOn(false);
   }, [canType, typeOn]);
+  // Render / Constraint / Export are unravel-view only — un-arm them on returning to
+  // the Building Perimeter tab so none lingers while its button is disabled, and drop
+  // the export marquee / selection / popup (all only make sense in the unravel view).
+  useEffect(() => {
+    if (!unravelOn) {
+      setRenderOn(false);
+      setConstraintOn(false);
+      setExportSelectMode(false);
+      setExportSelection(new Set());
+      setMarquee(null);
+      setExportPopup(null);
+    }
+  }, [unravelOn]);
 
   // Is the current sketch SAVED (a saved project is loaded/active)? A brand-new sketch
   // has activeSavedId == null until "＋ Save current sketch" is used (see the auto-save
@@ -4331,6 +4485,23 @@ export default function PolylineTool() {
               {searchQuery || "Smart search"}
             </span>
           </div>
+          {/* EXPORT — between the Smart Search bar and the Settings gear. Arms the
+              wall-selection MARQUEE (unravel/elevation views only): click-drag a box over
+              the panels to pick walls, release opens the export dialog. Blue while armed,
+              white otherwise; disabled in the Building Perimeter tab. */}
+          <button
+            className={`nav-header__export ${exportSelectMode ? "is-active" : ""}`}
+            onClick={toggleExportSelect}
+            disabled={!unravelOn}
+            aria-pressed={exportSelectMode}
+            title={
+              unravelOn
+                ? "Export — click-drag a box over the panels to select walls, then export to Revit / AutoCAD / Rhino (Esc cancels)"
+                : "Switch to an elevation view to export walls"
+            }
+          >
+            {exportSelectMode ? "Selecting…" : "Export"}
+          </button>
         <button
           className={`nav-header__settings ${settingsOpen ? "is-active" : ""}`}
           onClick={() => setSettingsOpen((on) => !on)}
@@ -4611,6 +4782,31 @@ export default function PolylineTool() {
                 </div>
               )}
             </div>
+          </div>
+          {/* TOP-RIGHT tool cluster — Render · Constraint. Anchored just LEFT of the
+              Projects minimap and in line horizontally with the top-left undo/redo row
+              (same top inset). SCAFFOLDED toggle buttons (no behaviour yet): blue while
+              armed, white otherwise, and only clickable outside the Building Perimeter
+              tab (disabled until the user opens an unravel/elevation view). */}
+          <div className="topright-tools">
+            <button
+              className={`history-btn ${renderOn ? "is-active" : ""}`}
+              onClick={() => setRenderOn((on) => !on)}
+              disabled={!unravelOn}
+              aria-pressed={renderOn}
+              title="Render"
+            >
+              Render
+            </button>
+            <button
+              className={`history-btn ${constraintOn ? "is-active" : ""}`}
+              onClick={() => setConstraintOn((on) => !on)}
+              disabled={!unravelOn}
+              aria-pressed={constraintOn}
+              title="Constraint"
+            >
+              Constraint
+            </button>
           </div>
           {/* BOTTOM-LEFT tool cluster — Collapse · CW Type · Floor plate · Centerlines · Framing.
               A flex row (mirrors the top-left .history-controls) so the buttons are
@@ -4910,6 +5106,19 @@ export default function PolylineTool() {
             // immediately instead of snapping back to the stored snapshot.
             livePerimeter={perimeter}
           />
+          {/* EXPORT popup: opens on a non-empty marquee release. Portals into the
+              canvas-wrap (stageRef), previews ONLY the selected walls in 3D, and
+              downloads a unit-preserving DXF for Revit / AutoCAD / Rhino. */}
+          {exportPopup && (
+            <ExportPopup
+              perimeter={perimeter}
+              edges={exportPopup}
+              heights={unravelHeights}
+              defaultHeight={unravelHeight}
+              stageRef={wrapRef}
+              onClose={() => setExportPopup(null)}
+            />
+          )}
           {/* OVERVIEW MAP — small draggable navigator at the BOTTOM-LEFT of the
               canvas, ABOVE the Floor plate / Subtractive / Additive cluster. Mirrors
               whatever the main canvas shows — the WHOLE footprint in draw/edit, or the
@@ -5104,6 +5313,9 @@ function ControlsList() {
       <li><b>Ctrl+Z / Ctrl+Y</b> undo / redo (Ctrl+Shift+Z also redoes)</li>
       <li><b>Ctrl+S</b> save perimeter → mini-window (top-right)</li>
       <li><b>Statistics</b> (top, next to Redo) toggle a dropdown of live stats for the current view (perimeter, or unravel when in elevation) · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · Esc or re-click to close · stays open while you work</li>
+      <li><b>Render</b> · <b>Constraint</b> (top row, just left of the Projects minimap, in line with Undo/Redo) toggle blue when selected / white when deselected like the other tool buttons · enabled only once you leave the <b>Building Perimeter</b> tab (in the elevation/unravel views)</li>
+      <li><b>Export</b> (nav header, between Smart Search and Settings) arms the <b>wall-selection marquee</b> in the elevation/unravel views (blue while armed; disabled in the Building Perimeter tab) · <b>click-drag</b> a box over the panels to select every wall it touches (selected walls highlight <b>green</b>) · <b>release</b> opens the export dialog · <b>Esc</b> cancels</li>
+      <li><b>Export dialog</b> shows a 3D preview of <b>only the selected walls</b> (<b>drag</b> to orbit · drag the title bar to move) · <b>Revit / AutoCAD / Rhino</b> buttons download a <b>DXF</b> that preserves real dimensions in <b>feet</b> · click outside to flash · <b>Esc</b> / <b>×</b> to close</li>
       <li><b>Unroll Elevations</b> (top tab) unravels the geometry — unrolls edges clockwise into equal-length strips · the <b>Unroll Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs stay disabled until the sketch is saved (<b>＋ Save current sketch</b> in the Projects panel)</li>
       <li><b>Floor Lines</b> (bottom-left, unravel view) — enabled once the selected panel has a <b>CW Type</b> · <b>click</b> arms the tool to drop horizontal level lines (click the canvas to add, click a line to remove; Esc or re-click to finish) · the <b>eye icon</b> on the button's right edge shows / hides all floor lines without deleting them · the ground <b>0′</b> line is permanent (always present, can't be deleted)</li>
       <li><b>Floor-plate snap</b> after the first plate above ground, new plates snap to multiples of that floor-to-floor height · <b>Shift</b> bypasses the snap (free / grid placement)</li>

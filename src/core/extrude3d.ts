@@ -98,10 +98,17 @@ export interface Massing {
  * equivalent to a resolver that ignores the edge index. Non-finite or ≤ 0
  * resolved heights are floored to {@link DEFAULT_WALL_HEIGHT_FT} so a wall always
  * has positive extent.
+ *
+ * When `edges` is supplied, ONLY walls whose ORIGINAL perimeter edge index is in
+ * the set are built — a SUB-MASSING of just those edges (e.g. an export selection
+ * or a 3D preview of selected walls). Every flattened sub-quad of a curved edge
+ * shares that edge's index, so a selected curved wall is kept whole. Omit `edges`
+ * (the default) to build the entire footprint.
  */
 export function buildMassing(
   p: Perimeter,
   height: number | ((edgeIndex: number) => number) = DEFAULT_WALL_HEIGHT_FT,
+  edges?: ReadonlySet<number>,
 ): Massing {
   const faces: Face[] = [];
   const v = p.vertices;
@@ -132,6 +139,9 @@ export function buildMassing(
     const a = outline[i];
     const b = outline[i + 1];
     const edge = edgeOfPoint[i];
+    // Selection filter: skip walls whose source edge is not in the requested set
+    // (builds a sub-massing of just the selected edges). No set => keep every wall.
+    if (edges && !edges.has(edge)) continue;
     // Top Z comes from THIS wall's source edge, so per-panel heights map directly
     // onto the matching wall(s) — every flattened sub-quad of a curved edge rises
     // to that edge's height.
@@ -428,6 +438,13 @@ export interface Render3dOptions {
    * Study popup only; thumbnails omit it (so their rendering is unchanged).
    */
   sunPath?: { settings: SolarSettings };
+  /**
+   * When set, extrude ONLY the walls whose ORIGINAL perimeter edge index is in the
+   * set — a preview of just the SELECTED walls (e.g. the export selection), framed
+   * on their own. The whole footprint is built when omitted. Forwarded straight to
+   * {@link buildMassing}; each wall keeps its real per-edge height.
+   */
+  edges?: ReadonlySet<number>;
 }
 
 /**
@@ -496,8 +513,9 @@ export function render3d(
   const highlightAsLine = options.highlightAsLine ?? false;
 
   // Resolve each wall's height from its source edge: per-edge override first, then
-  // the uniform default. (buildMassing guards non-finite/≤0 values.)
-  const massing = buildMassing(perimeter, (edge) => heights?.[edge] ?? wallHeight);
+  // the uniform default. (buildMassing guards non-finite/≤0 values.) `options.edges`,
+  // when present, restricts the massing to just those selected walls.
+  const massing = buildMassing(perimeter, (edge) => heights?.[edge] ?? wallHeight, options.edges);
   if (massing.faces.length === 0) return;
 
   // Project every face's vertices and gather all projected points for the fit.
