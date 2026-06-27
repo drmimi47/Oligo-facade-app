@@ -57,6 +57,8 @@ interface MiniWindowProps {
   onLoad: (s: SavedPerimeter) => void;
   /** Delete a saved perimeter. */
   onDelete: (id: string) => void;
+  /** Duplicate an entire saved project (perimeter + elevations + framing + everything). */
+  onDuplicate: (id: string) => void;
   /** Rename a saved perimeter. */
   onRename: (id: string, name: string) => void;
   /** Persist an edited geo-location onto a saved entry (from its Solar Study popup). */
@@ -111,6 +113,7 @@ export default function MiniWindow({
   activeId,
   onLoad,
   onDelete,
+  onDuplicate,
   onRename,
   onLocationChange,
   onSolarChange,
@@ -217,7 +220,7 @@ export default function MiniWindow({
         onPointerMove={onTitlePointerMove}
         onPointerUp={onTitlePointerUp}
       >
-        <span className="mini__title">Saved ({saved.length})</span>
+        <span className="mini__title">Projects ({saved.length})</span>
         <button
           className="mini__iconbtn"
           onClick={() => setCollapsed((c) => !c)}
@@ -232,7 +235,7 @@ export default function MiniWindow({
       {!collapsed && (
         <div className="mini__body">
           {saved.length === 0 ? (
-            <div className="mini__empty">No saved perimeters yet. Use ＋ below to save the current sketch.</div>
+            <div className="mini__empty">No projects yet. Use ＋ below to save the current sketch.</div>
           ) : (
             <ul className="mini__list">
               {saved.map((s) => (
@@ -242,6 +245,7 @@ export default function MiniWindow({
                   active={s.id === activeId}
                   onLoad={onLoad}
                   onDelete={onDelete}
+                  onDuplicate={onDuplicate}
                   onRename={onRename}
                   onOpenSolar={toggleSolar}
                   // While this entry's Solar Study is open, its thumbnail shares the
@@ -280,7 +284,7 @@ export default function MiniWindow({
           title={canSave ? "Save the current sketch as a new preview (Ctrl+S)" : "Draw at least 2 vertices to save"}
           aria-label="Save current sketch as a new preview"
         >
-          <span className="mini__addbtn-plus" aria-hidden="true">＋</span> Save current sketch
+          <span className="mini__addbtn-plus" aria-hidden="true">＋</span> Save
         </button>
       </div>
 
@@ -311,6 +315,7 @@ interface ThumbProps {
   active: boolean;
   onLoad: (s: SavedPerimeter) => void;
   onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onRename: (id: string, name: string) => void;
   /** Open this entry's Solar Study popup (by id). */
   onOpenSolar: (id: string) => void;
@@ -335,7 +340,7 @@ interface ThumbProps {
 }
 
 /** One saved-perimeter row: a live thumbnail + name + stats + actions. */
-function Thumb({ saved, active, onLoad, onDelete, onRename, onOpenSolar, camera: controlledCamera, onCameraChange, highlightEdge, highlightAsLine, heights, defaultHeight, livePerimeter }: ThumbProps) {
+function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenSolar, camera: controlledCamera, onCameraChange, highlightEdge, highlightAsLine, heights, defaultHeight, livePerimeter }: ThumbProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(saved.name);
@@ -575,7 +580,7 @@ function Thumb({ saved, active, onLoad, onDelete, onRename, onOpenSolar, camera:
           </button>
         )}
         <div className="mini__stats">
-          {stats.vertices} v · {stats.length.toFixed(1)} {UNIT_ABBR}
+          {stats.length.toFixed(1)} {UNIT_ABBR}
           {saved.perimeter.closed ? ` · ${stats.area.toFixed(1)} ${UNIT_AREA_ABBR}` : ""}
         </div>
       </div>
@@ -599,6 +604,14 @@ function Thumb({ saved, active, onLoad, onDelete, onRename, onOpenSolar, camera:
           aria-label="Rename"
         >
           ✎
+        </button>
+        <button
+          className="mini__iconbtn"
+          onClick={() => onDuplicate(saved.id)}
+          title="Duplicate this project (perimeter, elevations, framing — everything)"
+          aria-label="Duplicate"
+        >
+          ⧉
         </button>
         <button
           className="mini__iconbtn mini__iconbtn--danger"

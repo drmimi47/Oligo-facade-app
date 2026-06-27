@@ -109,7 +109,7 @@ export function isBlankLocation(l: LocationInfo | undefined | null): boolean {
 export interface SavedPerimeter {
   /** Stable unique id (used as React key and for load/delete/update). */
   id: string;
-  /** User-facing name; auto-generated ("Perimeter 1") but renameable. */
+  /** User-facing name; auto-generated ("Option 1") but renameable. */
   name: string;
   /** Epoch millis when first saved (for ordering / display). */
   createdAt: number;
@@ -224,8 +224,22 @@ export function cloneElevationState(e: SavedElevationState): SavedElevationState
 }
 
 /**
+ * Pick the next auto name ("Option N") so names stay sequential: one past the
+ * highest "Option N" already present, so deleting and re-saving doesn't reuse a
+ * confusingly low number mid-session.
+ */
+function nextOptionName(existing: SavedPerimeter[]): string {
+  let maxN = 0;
+  for (const s of existing) {
+    const m = /^Option (\d+)$/.exec(s.name);
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  }
+  return `Option ${Math.max(existing.length, maxN) + 1}`;
+}
+
+/**
  * Build a new SavedPerimeter from the live perimeter + elevation state. `existing`
- * is used only to pick the next auto name ("Perimeter N") so names stay sequential.
+ * is used only to pick the next auto name ("Option N") so names stay sequential.
  * The perimeter and elevation state are deep-copied so later edits to the live
  * document can never mutate this stored snapshot.
  */
@@ -235,17 +249,10 @@ export function makeSavedPerimeter(
   existing: SavedPerimeter[],
   location: LocationInfo = emptyLocation(),
 ): SavedPerimeter {
-  // Next number = one past the highest "Perimeter N" already present, so deleting
-  // and re-saving doesn't reuse a confusingly low number mid-session.
-  let maxN = 0;
-  for (const s of existing) {
-    const m = /^Perimeter (\d+)$/.exec(s.name);
-    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
-  }
   const elev = cloneElevationState(elevation);
   return {
     id: makeId(),
-    name: `Perimeter ${Math.max(existing.length, maxN) + 1}`,
+    name: nextOptionName(existing),
     createdAt: Date.now(),
     perimeter: clonePerimeter(p),
     unravelHeights: elev.unravelHeights,
@@ -260,6 +267,24 @@ export function makeSavedPerimeter(
     floorPlates: elev.floorPlates,
     location: cloneLocation(location),
   };
+}
+
+/**
+ * Duplicate an ENTIRE saved project — perimeter, all elevation/panel state (heights,
+ * divisions, mullions, Unitized cell framing, CW types), floor plates, geo-location, and
+ * solar settings — into a brand-new entry with a fresh id, a fresh `createdAt`, and the
+ * next sequential "Option N" name. The whole entry is plain JSON-serialisable data, so a
+ * structured/JSON deep clone fully detaches the copy from the source (and from live state).
+ */
+export function duplicateSavedPerimeter(src: SavedPerimeter, existing: SavedPerimeter[]): SavedPerimeter {
+  const copy: SavedPerimeter =
+    typeof structuredClone === "function"
+      ? structuredClone(src)
+      : (JSON.parse(JSON.stringify(src)) as SavedPerimeter);
+  copy.id = makeId();
+  copy.name = nextOptionName(existing);
+  copy.createdAt = Date.now();
+  return copy;
 }
 
 /** Convenience readouts for a saved perimeter (curve-accurate). */

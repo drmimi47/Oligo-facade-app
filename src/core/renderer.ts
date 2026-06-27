@@ -323,6 +323,29 @@ export interface RenderState {
    * the OverviewMap sets it true for a clean boundaries-only strip.
    */
   unravelBoundariesOnly?: boolean;
+  /**
+   * CLEAN view (the "View" button's Clean mode). When true the UNRAVEL panels render
+   * as a clean presentation: each panel is filled opaque WHITE behind the framing, and
+   * the centerlines (cell splits / divisions / dividers), the dimension labels, and the
+   * floor plates are all HIDDEN. The framing (mullion faces) is still drawn. Default
+   * false/undefined (every other view renders normally).
+   */
+  cellClean?: boolean;
+  /**
+   * SHADOWS view (the "View" button's Shadows mode). A 2.5D presentation: it renders
+   * the same clean white glass as CLEAN (centerlines / dimensions / floor plates hidden),
+   * and ADDITIONALLY treats every framing bar (Stick mullions + Unitized cell framing) as
+   * a member raised above the glass that casts a crisp, hard-edged drop shadow onto the
+   * glass beside it. The shadow falls on the glass on both sides of a bar (into cells and
+   * across into neighbours) but never on the frame infill itself. Default false/undefined.
+   */
+  cellShadows?: boolean;
+  /**
+   * Floor Lines "Hide" (the Floor Lines submenu's visibility toggle). When true, the floor
+   * lines (and their elevation labels / eraser highlights) are NOT drawn — they are only
+   * hidden from view, not deleted. Default false/undefined (floor lines drawn normally).
+   */
+  floorPlatesHidden?: boolean;
 }
 
 /** Read a CSS custom property from an element, with a fallback. */
@@ -369,6 +392,17 @@ export function render(
     unravelEraseHighlightW: cssNum(canvas, "--unravel-erase-highlight-width", 3),
     unravelRectFill: cssVar(canvas, "--unravel-rect-fill", "rgba(31,111,235,0.10)"),
     unravelHighlightFill: cssVar(canvas, "--unravel-highlight-fill", "rgba(210,49,84,0.18)"),
+    // CLEAN view: opaque white fill behind the framing (the glass area reads white,
+    // with centerlines / floor plates / dimensions hidden — see the "View" Clean mode).
+    unravelCleanFill: cssVar(canvas, "--unravel-clean-fill", "#ffffff"),
+    // SHADOWS view: hard-edged drop-shadow colour + the framing member "depth" in FEET
+    // that sets the shadow's offset (model-space, so it scales with zoom for a 2.5D look).
+    frameShadow: cssVar(canvas, "--frame-shadow-color", "rgba(17,22,28,0.30)"),
+    frameShadowDepth: cssNum(canvas, "--frame-shadow-depth", 0.4),
+    // SHADOWS view is MONOCHROME: the panel outlines and framing faces drop their
+    // blue/teal/orange tints for neutral greys (hover highlights stay coloured).
+    frameMonoOutline: cssVar(canvas, "--frame-mono-outline", "#4a4a4a"),
+    frameMonoFrame: cssVar(canvas, "--frame-mono-frame", "#6e6e6e"),
     // Per-cell hover tint (Panels phase): a single grid cell lit under the cursor.
     unravelCellHighlightFill: cssVar(canvas, "--unravel-cell-highlight-fill", "rgba(31,111,235,0.18)"),
     // Assembly phase: red stroke for the focused cell's hovered top/right/bottom/left edge.
@@ -446,11 +480,18 @@ export function render(
       state.focusedCellDims ?? null,
       state.focusedCellEdge ?? null,
       state.unravelBoundariesOnly ?? false,
+      state.cellClean ?? false,
+      state.cellShadows ?? false,
       tk,
     );
     // OVERVIEW boundaries-only mode draws nothing but the panel rectangles — no
     // floor plates (they are an elevation overlay, not a panel boundary).
     if (state.unravelBoundariesOnly) return;
+    // Floor-line visibility is controlled SOLELY by the Floor Lines submenu's Show / Hide
+    // (state.floorPlatesHidden) — the CLEAN and SHADOWS presentation views do NOT auto-hide
+    // them. "Hide" suppresses drawing floor lines (kept in the model, just not shown).
+    // Nothing else is drawn after, so return.
+    if (state.floorPlatesHidden) return;
     // Floor-plate level lines sit on top of the unravel rectangles. In the
     // UNRAVEL view they are also LABELLED with their height (elevation above the
     // panel baseline at model y = 0, which is the ground floor = height 0). The
@@ -794,6 +835,10 @@ function drawUnravel(
   /** ASSEMBLY phase: which edge of the focused cell to stroke red (hovered), or null. */
   focusedCellEdge: "top" | "right" | "bottom" | "left" | null,
   boundariesOnly: boolean,
+  /** CLEAN view: white panel fill, centerlines / dimensions / floor plates hidden. */
+  clean: boolean,
+  /** SHADOWS view: like CLEAN, plus raised-frame hard drop shadows on the glass. */
+  shadows: boolean,
   tk: {
     unravelLine: string;
     unravelCurve: string;
@@ -803,6 +848,11 @@ function drawUnravel(
     unravelEraseHighlightW: number;
     unravelRectFill: string;
     unravelHighlightFill: string;
+    unravelCleanFill: string;
+    frameShadow: string;
+    frameShadowDepth: number;
+    frameMonoOutline: string;
+    frameMonoFrame: string;
     unravelCellHighlightFill: string;
     unravelEdgeSelect: string;
     cellViewSat: number;
@@ -837,8 +887,14 @@ function drawUnravel(
     const w = baseR.x - baseL.x;
     const rectH = baseL.y - topL.y;
 
-    // Fill.
-    ctx.fillStyle = hovered ? tk.unravelHighlightFill : tk.unravelRectFill;
+    // PRESENTATION views (CLEAN and SHADOWS) share the same hiding rules: white glass,
+    // and the centerlines / dimensions / floor plates suppressed. SHADOWS layers raised-
+    // frame drop shadows on top of that clean base.
+    const presentation = clean || shadows;
+
+    // Fill. PRESENTATION views fill the panel opaque WHITE (the glass behind the framing);
+    // otherwise the translucent panel tint (or the warm hover fill).
+    ctx.fillStyle = presentation ? tk.unravelCleanFill : hovered ? tk.unravelHighlightFill : tk.unravelRectFill;
     ctx.fillRect(x, y, w, rectH);
 
     // MATERIAL-ID view: tint each grid cell by its SHAPE colour. Drawn over the base
@@ -895,7 +951,7 @@ function drawUnravel(
     // edges are dashed regardless so their arc-length origin stays distinguishable.
     ctx.beginPath();
     ctx.rect(x, y, w, rectH);
-    ctx.strokeStyle = hovered ? tk.highlight : seg.curved ? tk.unravelCurve : tk.unravelLine;
+    ctx.strokeStyle = hovered ? tk.highlight : shadows ? tk.frameMonoOutline : seg.curved ? tk.unravelCurve : tk.unravelLine;
     ctx.lineWidth = hovered ? tk.highlightW : tk.segmentW;
     if (seg.curved) ctx.setLineDash([6, 4]);
     ctx.stroke();
@@ -913,8 +969,9 @@ function drawUnravel(
     ctx.setLineDash([9, 4, 1.5, 4]);
 
     // Cell splits: N-1 equal-width vertical division lines inside the rectangle.
+    // Hidden in CLEAN view (centerlines are suppressed there).
     const nCells = Math.max(1, Math.round(cells));
-    if (nCells > 1) {
+    if (!presentation && nCells > 1) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (let k = 1; k < nCells; k++) {
@@ -930,7 +987,7 @@ function drawUnravel(
 
     // User-placed division lines (Centerlines tool): dashed centerlines at each stored
     // OFFSET from the panel's left edge, baseline → top. Drawn in the cell colour.
-    if (divisions && divisions.length > 0) {
+    if (!presentation && divisions && divisions.length > 0) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (const off of divisions) {
@@ -947,7 +1004,7 @@ function drawUnravel(
     // User-placed HORIZONTAL dividers (Centerlines tool + Shift): dashed centerlines at
     // each stored OFFSET from the panel's baseline (y = 0), spanning x0 → x1. Same cell
     // colour/width as the vertical divisions, just rotated 90°.
-    if (dividersH && dividersH.length > 0) {
+    if (!presentation && dividersH && dividersH.length > 0) {
       ctx.strokeStyle = tk.unravelCell;
       ctx.lineWidth = tk.segmentW;
       for (const off of dividersH) {
@@ -982,8 +1039,103 @@ function drawUnravel(
     for (const off of dividersH ?? []) if (off > 0 && off < h) gridYs.push(off);
 
     const mv = mullionV ?? 0;
+    const mh = mullionH ?? 0;
+    // Framing-face stroke colour: neutral grey in the MONOCHROME Shadows view, otherwise
+    // the normal framing tint. (Hover highlights below still use the coloured tokens.)
+    const frameStroke = shadows ? tk.frameMonoFrame : tk.unravelMullion;
+
+    // SHADOWS view: render every framing BAR as a member raised above the glass that
+    // casts a crisp, hard-edged CAST shadow. We collect each bar as a model-space rect
+    // (Stick mullion bands + Unitized cell-framing borders), then (1) clip to the panel,
+    // (2) fill each bar's SWEPT silhouette — the convex hull of the bar and its copy
+    // offset by the member "depth" (model-space, so it scales with zoom) — in the shadow
+    // colour, and (3) repaint the bars themselves opaque white. The swept hull keeps the
+    // shadow ATTACHED to the bar's edges with a diagonal outer edge (the cast-shadow
+    // angle), so even a THIN frame has a connected shadow with no floating gap. The shadow
+    // lands on the glass on BOTH sides of a bar (into cells and across into neighbours) but
+    // NEVER on the frame infill. Drawn here, BEFORE the frame faces below, so those crisp
+    // lines sit on top. Bar geometry matches the framing drawn later (Stick ±offset bands;
+    // Unitized mitered borders inset to the infill rect).
+    if (shadows) {
+      type Rect = { x: number; y: number; w: number; h: number };
+      const toRect = (mx0: number, my0: number, mx1: number, my1: number): Rect => {
+        const a = toScreen(vp, { x: mx0, y: my0 });
+        const b = toScreen(vp, { x: mx1, y: my1 });
+        return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+      };
+      const bars: Rect[] = [];
+      // Stick vertical mullion bands: [cx-mv, cx+mv] × full height.
+      if (mv > 0) for (const cx of gridXs) bars.push(toRect(Math.max(lo, cx - mv), 0, Math.min(hi, cx + mv), h));
+      // Stick horizontal mullion bands: full width × [cy-mh, cy+mh].
+      if (mh > 0) for (const cy of gridYs) bars.push(toRect(lo, Math.max(0, cy - mh), hi, Math.min(h, cy + mh)));
+      // Unitized cell framing: the mitered border of each framed edge (cell edge → infill).
+      if (cellFraming) for (const fc of cellFraming) {
+        const inL = fc.x0 + (fc.left > 0 ? fc.left : 0);
+        const inR = fc.x1 - (fc.right > 0 ? fc.right : 0);
+        const inB = fc.y0 + (fc.bottom > 0 ? fc.bottom : 0);
+        const inT = fc.y1 - (fc.top > 0 ? fc.top : 0);
+        if (fc.top > 0) bars.push(toRect(fc.x0, inT, fc.x1, fc.y1));
+        if (fc.bottom > 0) bars.push(toRect(fc.x0, fc.y0, fc.x1, inB));
+        if (fc.left > 0) bars.push(toRect(fc.x0, fc.y0, inL, fc.y1));
+        if (fc.right > 0) bars.push(toRect(inR, fc.y0, fc.x1, fc.y1));
+      }
+      if (bars.length > 0) {
+        // Cast-shadow offset (px): a model-space "depth" toward bottom-right (light from
+        // the upper-left). Derived from two toScreen samples so it scales with zoom; with
+        // model +Y up flipping to screen -Y, model (depth, -depth) maps to screen (+, +).
+        const o0 = toScreen(vp, { x: 0, y: 0 });
+        const o1 = toScreen(vp, { x: tk.frameShadowDepth, y: -tk.frameShadowDepth });
+        const ox = o1.x - o0.x;
+        const oy = o1.y - o0.y;
+        // SWEPT hull of a bar (x0,y0)-(x1,y1) toward (+ox,+oy): the convex hull of the bar
+        // and its offset copy — a hexagon sharing the bar's TOP and LEFT edges, so the
+        // shadow stays attached to the bar (the part beyond the bar's right/bottom edges is
+        // the visible cast shadow, bounded by a diagonal). All hulls are wound the same way
+        // so a single nonzero fill paints the union once (uniform tone, no compounding).
+        const addHull = (b: Rect) => {
+          const x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h;
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y0);
+          ctx.lineTo(x1 + ox, y0 + oy);
+          ctx.lineTo(x1 + ox, y1 + oy);
+          ctx.lineTo(x0 + ox, y1 + oy);
+          ctx.lineTo(x0, y1);
+          ctx.closePath();
+        };
+        // Clip to the panel rect so shadows stay on this glass card, then fill ALL swept
+        // hulls as a SINGLE path in ONE fill call. Filling once (nonzero winding) paints
+        // each covered pixel exactly once, so overlapping shadows read as one flat tone —
+        // no darker compounded sections. (No blur — hard, crisp edges.)
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, w, rectH);
+        ctx.clip();
+        ctx.fillStyle = tk.frameShadow;
+        ctx.beginPath();
+        for (const b of bars) addHull(b);
+        ctx.fill();
+        ctx.restore();
+        // Repaint the bars opaque white — removes the hull's bar-footprint portion (so the
+        // shadow only shows on glass, meeting the bar's right/bottom edges with no gap) and
+        // leaves each member reading as a solid raised bar (the frame faces stroke on top).
+        ctx.fillStyle = tk.unravelCleanFill;
+        for (const b of bars) ctx.fillRect(b.x, b.y, b.w, b.h);
+        // Frame bars run to the panel edge, so the white repaint (and the clipped shadow
+        // fill) just overwrote the INNER half of the border line wherever a mullion meets
+        // it — making the border read thinner there. Re-stroke the panel outline on top so
+        // it stays one continuous, full-weight line. (Matches the outline stroke above.)
+        ctx.beginPath();
+        ctx.rect(x, y, w, rectH);
+        ctx.strokeStyle = hovered ? tk.highlight : tk.frameMonoOutline;
+        ctx.lineWidth = hovered ? tk.highlightW : tk.segmentW;
+        if (seg.curved) ctx.setLineDash([6, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     if (mv > 0 && gridXs.length > 0) {
-      ctx.strokeStyle = tk.unravelMullion;
+      ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
       for (const cx of gridXs) {
         for (const side of [-mv, mv]) {
@@ -997,19 +1149,50 @@ function drawUnravel(
         }
       }
     }
-    const mh = mullionH ?? 0;
     if (mh > 0 && gridYs.length > 0) {
-      ctx.strokeStyle = tk.unravelMullion;
+      ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
+      // CLEAN view: keep the VERTICAL mullions reading as clean continuous lines by
+      // BREAKING the horizontal mullion faces around each vertical mullion BODY (the
+      // [cx-mv, cx+mv] band between its paired faces). A horizontal frame then stops at
+      // the vertical mullion instead of cutting through its infill. Outside Clean (or
+      // with no vertical mullions) the horizontal faces span the full panel width.
+      const breakV = presentation && mv > 0 && gridXs.length > 0;
+      let bands: Array<[number, number]> = [];
+      if (breakV) {
+        const raw = gridXs
+          .map((cx) => [Math.max(lo, cx - mv), Math.min(hi, cx + mv)] as [number, number])
+          .filter(([s, e]) => e > s)
+          .sort((a, b) => a[0] - b[0]);
+        for (const band of raw) {
+          const last = bands[bands.length - 1];
+          if (last && band[0] <= last[1]) last[1] = Math.max(last[1], band[1]);
+          else bands.push([band[0], band[1]]);
+        }
+      }
+      const strokeX = (x1: number, x2: number, fy: number) => {
+        if (x2 <= x1) return;
+        const a = toScreen(vp, { x: x1, y: fy });
+        const b = toScreen(vp, { x: x2, y: fy });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      };
       for (const cy of gridYs) {
         for (const side of [-mh, mh]) {
           const fy = Math.max(0, Math.min(h, cy + side));
-          const a = toScreen(vp, { x: seg.x0, y: fy });
-          const b = toScreen(vp, { x: seg.x1, y: fy });
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
+          if (!breakV || bands.length === 0) {
+            strokeX(lo, hi, fy);
+            continue;
+          }
+          // Draw the horizontal face only in the gaps between vertical mullion bands.
+          let cursor = lo;
+          for (const [bs, be] of bands) {
+            if (bs > cursor) strokeX(cursor, bs, fy);
+            cursor = Math.max(cursor, be);
+          }
+          if (cursor < hi) strokeX(cursor, hi, fy);
         }
       }
     }
@@ -1054,7 +1237,7 @@ function drawUnravel(
     // segment a frame is generated against reads as a SOLID framed mullion, not a bare
     // dashed centerline. Drawn after the dashed centerlines above, so it sits on top.
     if (cellFraming && cellFraming.length > 0) {
-      ctx.strokeStyle = tk.unravelMullion;
+      ctx.strokeStyle = frameStroke;
       ctx.lineWidth = tk.segmentW;
       const seg2 = (ax: number, ay: number, bx: number, by: number) => {
         const a = toScreen(vp, { x: ax, y: ay });
@@ -1065,24 +1248,33 @@ function drawUnravel(
         ctx.stroke();
       };
       for (const fc of cellFraming) {
+        // Inner INFILL rectangle: inset from each FRAMED edge (an unframed edge stays at
+        // the cell edge). In CLEAN view the inset faces span only this inner rect so the
+        // four faces miter at the inner corners — each cell reads as a clean frame around
+        // a white infill, with NO overshooting/intersecting lines. Other views keep the
+        // full-cell-span faces (the live editing representation).
+        const inL = fc.x0 + (fc.left > 0 ? fc.left : 0);
+        const inR = fc.x1 - (fc.right > 0 ? fc.right : 0);
+        const inB = fc.y0 + (fc.bottom > 0 ? fc.bottom : 0);
+        const inT = fc.y1 - (fc.top > 0 ? fc.top : 0);
         // top: inset face + solid line on the cell's top edge (centerline at y1).
         if (fc.top > 0) {
-          seg2(fc.x0, fc.y1 - fc.top, fc.x1, fc.y1 - fc.top);
+          seg2(presentation ? inL : fc.x0, fc.y1 - fc.top, presentation ? inR : fc.x1, fc.y1 - fc.top);
           seg2(fc.x0, fc.y1, fc.x1, fc.y1);
         }
         // bottom: inset face + solid line on the cell's bottom edge (centerline at y0).
         if (fc.bottom > 0) {
-          seg2(fc.x0, fc.y0 + fc.bottom, fc.x1, fc.y0 + fc.bottom);
+          seg2(presentation ? inL : fc.x0, fc.y0 + fc.bottom, presentation ? inR : fc.x1, fc.y0 + fc.bottom);
           seg2(fc.x0, fc.y0, fc.x1, fc.y0);
         }
         // left: inset face + solid line on the cell's left edge (centerline at x0).
         if (fc.left > 0) {
-          seg2(fc.x0 + fc.left, fc.y0, fc.x0 + fc.left, fc.y1);
+          seg2(fc.x0 + fc.left, presentation ? inB : fc.y0, fc.x0 + fc.left, presentation ? inT : fc.y1);
           seg2(fc.x0, fc.y0, fc.x0, fc.y1);
         }
         // right: inset face + solid line on the cell's right edge (centerline at x1).
         if (fc.right > 0) {
-          seg2(fc.x1 - fc.right, fc.y0, fc.x1 - fc.right, fc.y1);
+          seg2(fc.x1 - fc.right, presentation ? inB : fc.y0, fc.x1 - fc.right, presentation ? inT : fc.y1);
           seg2(fc.x1, fc.y0, fc.x1, fc.y1);
         }
       }
@@ -1246,7 +1438,7 @@ function drawUnravel(
     // (below), so its single overall-width label is suppressed — the per-column
     // labels replace it (for a single-column panel they coincide, so nothing is
     // lost). Every other panel keeps the normal one overall-width label.
-    if (seg.index !== cellDimEdge) {
+    if (!presentation && seg.index !== cellDimEdge) {
       drawCenteredLabel(
         ctx,
         canvas,
@@ -1263,7 +1455,7 @@ function drawUnravel(
     // to the strip view's single width-per-panel label. Boundaries are derived the
     // SAME way as cellsForEdge / the division mullions above so the labels line up
     // exactly with the drawn grid (dedupe epsilon 1e-6).
-    if (!boundariesOnly && seg.index === cellDimEdge) {
+    if (!boundariesOnly && !presentation && seg.index === cellDimEdge) {
       const lo = Math.min(seg.x0, seg.x1);
       const hi = Math.max(seg.x0, seg.x1);
       // VERTICAL boundaries: panel borders + equal-cell splits + Subtractive divisions.
@@ -1343,16 +1535,20 @@ function drawUnravel(
     const labelH = 16;
     // Left/right HEIGHT labels match the other dimensions' default text colour.
     const labelColor = cssVar(canvas, "--label-text", "#1c2530");
-    // TOP (width): centred above the top edge, its bottom edge one gap up.
-    drawCenteredLabel(ctx, canvas, centerX, tl.y - tk.unravelLabelGap, fmtFeetPrime(width));
-    // BOTTOM (width): centred below the bottom edge. drawCenteredLabel sits the
-    // label's BOTTOM at the passed y, so add the gap + the label height to park it
-    // just below the edge.
-    drawCenteredLabel(ctx, canvas, centerX, bl.y + tk.unravelLabelGap + labelH, fmtFeetPrime(width));
-    // LEFT (height): right-aligned one gap left of the left edge, vertically centred.
-    drawRightAlignedLabel(ctx, canvas, tl.x - tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
-    // RIGHT (height): left-aligned one gap right of the right edge, vertically centred.
-    drawLeftAlignedLabel(ctx, canvas, tr.x + tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
+    // Dimension labels are HIDDEN in CLEAN / SHADOWS presentation views (the red edge
+    // selection below stays so Assembly-phase edge targeting still works as an affordance).
+    if (!clean && !shadows) {
+      // TOP (width): centred above the top edge, its bottom edge one gap up.
+      drawCenteredLabel(ctx, canvas, centerX, tl.y - tk.unravelLabelGap, fmtFeetPrime(width));
+      // BOTTOM (width): centred below the bottom edge. drawCenteredLabel sits the
+      // label's BOTTOM at the passed y, so add the gap + the label height to park it
+      // just below the edge.
+      drawCenteredLabel(ctx, canvas, centerX, bl.y + tk.unravelLabelGap + labelH, fmtFeetPrime(width));
+      // LEFT (height): right-aligned one gap left of the left edge, vertically centred.
+      drawRightAlignedLabel(ctx, canvas, tl.x - tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
+      // RIGHT (height): left-aligned one gap right of the right edge, vertically centred.
+      drawLeftAlignedLabel(ctx, canvas, tr.x + tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
+    }
 
     // Hovered edge: stroke that ONE edge red (heavier width) to mark the selection.
     if (focusedCellEdge) {

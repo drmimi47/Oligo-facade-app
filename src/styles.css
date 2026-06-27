@@ -85,8 +85,30 @@
   --unravel-highlight-fill: rgba(210,49,84,0.18); /* Hovered unravel rectangle fill */
   --unravel-highlight-color: #d23154; /* Hovered unravel rect outline + linked shape edge (mini-window) */
   --unravel-cell-highlight-fill: rgba(31,111,235,0.18); /* Hovered individual CELL fill (Panels phase) — accent blue so it reads as selectable, distinct from the warm whole-panel hover */
+  --unravel-clean-fill: #ffffff; /* CLEAN view: opaque white glass fill behind the framing (centerlines / floor plates / dimensions hidden) */
   --unravel-edge-select: #e5484d; /* Assembly phase: the focused cell's top/right/bottom/left EDGE under the cursor, stroked red to mark it as selected (one edge at a time) */
   --unravel-mullion-color: #4f8aa0; /* Mullions tool (Stick system): the paired mullion-face lines drawn to either side (±offset) of each grid line */
+  /* SHADOWS view ("View" button): a 2.5D presentation that builds on CLEAN (white glass) and
+     casts a crisp, hard-edged drop shadow from every framing bar onto the glass beside it. */
+  --frame-shadow-color: rgba(17,22,28,0.30); /* SHADOWS view: hard drop-shadow fill (no blur) cast by each raised framing bar onto the glass — never on the frame infill */
+  --frame-shadow-depth: 0.8;                 /* SHADOWS view: framing member "depth" in FEET; sets the drop-shadow offset (model-space, so it scales with zoom). Larger = longer shadow */
+  /* SHADOWS view is MONOCHROME: the panel/cell geometry drops every blue/teal/orange tint for
+     neutral greys (the red + blue HOVER highlights stay coloured; the app UI is unaffected). */
+  --frame-mono-outline: #4a4a4a; /* SHADOWS view: panel + cell boundary outlines, neutral grey */
+  --frame-mono-frame: #6e6e6e;   /* SHADOWS view: framing faces (Stick mullions + Unitized cell framing), neutral grey */
+
+  /* === ONBOARDING HINT ===
+     First-run prompt centered on the empty canvas with a hand-drawn arched arrow toward
+     the Projects panel. Chalkboard/handwritten feel via a system handwriting font stack
+     (no web-font dependency); dismissed on the first interaction. */
+  --hint-font: "Ink Free", "Segoe Print", "Bradley Hand", "Chalkduster", "Comic Sans MS", cursive; /* chalkboard/handwritten stack (system fonts) */
+  --hint-color: #7a8694;          /* soft slate — chalk-like, readable on the light canvas */
+  --hint-font-size: 30px;         /* centered prompt text size */
+  --hint-line-gap: 2px;           /* vertical gap between the prompt's stacked lines */
+  --hint-arrow-top: 37%;          /* arrow placement: distance from canvas top (sits just above the text) */
+  --hint-arrow-right: 31%;        /* arrow placement: distance from canvas right (closer to the text, clear of the Projects panel) */
+  --hint-arrow-width: 150px;      /* arrow drawing width — short so it gestures toward the panel without reaching it */
+  --hint-arrow-stroke: 4.5;       /* arrow stroke weight (user units; scales with the smaller drawing) */
 
   /* === MATERIAL-ID CELL VIEW ===
      The "View" button's Material-ID mode tints every grid CELL by its geometric
@@ -903,11 +925,11 @@ input[type="checkbox"] {
 .eraser-btn:hover,
 .view-btn:hover { background: var(--control-bg-hover); }
 /* Armed state (Centerlines division / Mullions / Eraser deletion tool active) —
-   mirrors .floorplate-btn.is-active. */
+   mirrors .floorplate-btn.is-active. The View button is intentionally EXCLUDED: it stays
+   white in every display mode (it opens a menu, it isn't an armed tool). */
 .subtractive-btn.is-active,
 .mullions-btn.is-active,
-.eraser-btn.is-active,
-.view-btn.is-active {
+.eraser-btn.is-active {
   background: var(--control-bg-active);
   border-color: var(--control-bg-active);
   color: var(--color-text-on-accent);
@@ -927,10 +949,12 @@ input[type="checkbox"] {
 .eraser-btn:disabled:hover,
 .view-btn:disabled:hover { background: var(--control-bg); }
 
-/* === CW TYPE chooser menu ===
-   The "CW Type" button opens a small two-option popup ABOVE it (Stick / Unitized).
-   Anchored to the button via a relative wrapper so it needs no JS positioning. */
-.cw-type-wrap { position: relative; display: inline-flex; }
+/* === CW TYPE / FLOOR LINES chooser menus ===
+   The "CW Type" and "Floor Lines" buttons each open a small popup ABOVE them (drop-up).
+   Anchored to the button via a relative wrapper so they need no JS positioning. Both reuse
+   the .cw-menu / .cw-menu__btn styling below. */
+.cw-type-wrap,
+.floorlines-wrap { position: relative; display: inline-flex; }
 .cw-menu {
   position: absolute;
   left: 0;
@@ -947,7 +971,8 @@ input[type="checkbox"] {
   box-shadow: var(--mini-shadow);
   white-space: nowrap;
 }
-.cw-menu__btn {
+.cw-menu__btn,
+.view-menu__btn {
   height: var(--control-height);
   padding: 0 var(--space-2);
   text-align: left;
@@ -957,11 +982,87 @@ input[type="checkbox"] {
   color: var(--control-text);
   font-size: var(--font-size-base);
   cursor: pointer;
+  white-space: nowrap;
 }
-.cw-menu__btn:hover { background: var(--control-bg-hover); }
-.cw-menu__btn.is-active {
+.cw-menu__btn:hover,
+.view-menu__btn:hover { background: var(--control-bg-hover); }
+.cw-menu__btn.is-active,
+.view-menu__btn.is-active {
   background: var(--control-bg-active);
   color: var(--color-text-on-accent);
+}
+
+/* === VIEW display-mode menu ===
+   The "View" button (top-left, next to Statistics) opens this list of display modes.
+   Unlike the CW Type menu it DROPS DOWN (the button is at the top of the canvas), so it
+   pins to the button's bottom edge via the relative .view-anchor wrapper. */
+.view-anchor { position: relative; display: inline-flex; }
+.view-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + var(--space-1));            /* drop DOWN, just below the button */
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 100%;
+  padding: var(--space-1);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  white-space: nowrap;
+}
+
+/* Buttons that open a popup menu (Statistics, View, CW Type, Floor Lines) append a plain
+   "▾" glyph inline in the button label — same chevron across all of them (full font-size
+   and control-text colour), so the affordance reads consistently. No separate element. */
+
+/* === ONBOARDING HINT ===
+   First-run prompt centered over the empty canvas with a hand-drawn arched arrow toward
+   the Projects panel (top-right). Pointer-transparent so it never blocks drawing; it is
+   unmounted on the first interaction (see PolylineTool's showHint). A short fade-in keeps
+   the appearance gentle (the disappearance is immediate on dismiss). */
+.canvas-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 40;                 /* above the canvas, below the floating controls (z 50) */
+  pointer-events: none;        /* never intercept clicks — the canvas owns them */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: canvas-hint-in 220ms ease-out;
+}
+@keyframes canvas-hint-in { from { opacity: 0; } to { opacity: 1; } }
+.canvas-hint__text {
+  display: flex;
+  flex-direction: column;      /* stack the lines (centered, multi-line — not one row) */
+  align-items: center;
+  gap: var(--hint-line-gap);
+  font-family: var(--hint-font);
+  font-size: var(--hint-font-size);
+  line-height: 1.2;
+  color: var(--hint-color);
+  text-align: center;
+  user-select: none;
+  transform: translateY(-4%);  /* nudge up so the arrow has room to arc toward the panel */
+}
+.canvas-hint__arrow {
+  position: absolute;
+  top: var(--hint-arrow-top);
+  right: var(--hint-arrow-right);
+  width: var(--hint-arrow-width);
+  height: auto;
+  color: var(--hint-color);    /* the strokes use currentColor */
+  overflow: visible;
+}
+.canvas-hint__arrow-shaft,
+.canvas-hint__arrow-head {
+  stroke: currentColor;
+  stroke-width: var(--hint-arrow-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
 }
 
 /* === HELP BUTTON ===
