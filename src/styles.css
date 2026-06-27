@@ -259,6 +259,12 @@
   --solar-width: 760px;                   /* Popup width (≥2× the old 380px) */
   --solar-canvas-height: 600px;           /* Larger massing canvas height (2× the old 300px) */
 
+  /* === SETTINGS POPUP ===
+     Shares the Solar Study chrome (surfaces/border/shadow) but is narrower and uses a
+     Rhino-style two-pane interior (category rail + content). */
+  --settings-width: 520px;                /* Settings popup width (narrower than Solar Study) */
+  --settings-nav-width: 150px;            /* Left category-rail width */
+
   /* --- Sun-path DOME (read by core/extrude3d.ts when drawing the Solar Study) ---
      The 3D sun study drawn around the massing: horizon compass rose, the summer /
      equinox / winter reference arcs, the selected day's arc (the "active" one,
@@ -1773,14 +1779,80 @@ input[type="checkbox"] {
   padding: var(--space-2);
 }
 
-/* Settings body — blank for now; a min-height keeps the popup a sensible size until
-   controls are added. */
+/* Settings is narrower than the Solar Study popup it borrows chrome from. */
+.settings { width: var(--settings-width); }
+
+/* Settings body — Rhino-style two-pane layout: a category rail on the LEFT and the
+   selected category's controls on the RIGHT. min-height keeps the popup a sensible
+   size while the category set is still sparse. Panes own their own padding. */
 .settings__body {
   display: flex;
+  flex-direction: row;
+  padding: 0;
+  min-height: 240px;
+}
+
+/* Left category rail */
+.settings__nav {
+  flex: 0 0 var(--settings-nav-width);
+  display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-1);
   padding: var(--space-2);
-  min-height: 220px;
+  background: var(--mini-titlebar-bg);
+  border-right: 1px solid var(--mini-border);
+}
+.settings__nav-item {
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+.settings__nav-item:hover { background: var(--mini-item-hover-bg); }
+.settings__nav-item.is-active {
+  background: var(--mini-item-active-bg);
+  box-shadow: inset 2px 0 0 var(--mini-item-active-border);  /* accent spine, Rhino-style */
+  font-weight: 600;
+}
+
+/* Right content pane */
+.settings__pane {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+.settings__pane-title {
+  margin: 0;
+  font-size: var(--font-size-section);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--color-text-dim);
+}
+.settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.settings__label { font-size: var(--font-size-base); color: var(--color-text); }
+/* Keep the unit switch a fixed size rather than stretching across the row. */
+.settings__row .segmented { flex: 0 0 200px; }
+
+/* Footer — Save button (a standard .btn) parked bottom-right, divider above it. */
+.settings__footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--mini-border);
+  background: var(--mini-titlebar-bg);
 }
 
 .solar__canvas {

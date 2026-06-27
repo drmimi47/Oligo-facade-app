@@ -14,7 +14,7 @@ import { distance, angleDeg, isCurved, segmentCubic, handlePoint } from "./geome
 import type { Viewport } from "./viewport";
 import { toScreen } from "./viewport";
 import type { UnravelSegment } from "./unravel";
-import { fmtFeetPrime } from "./units";
+import { fmtLengthTick, lengthTick } from "./units";
 
 /**
  * Golden-angle hue step (degrees) for the Material-ID cell view. Spacing successive
@@ -700,10 +700,10 @@ function drawFloorPlates(
   // Markers use the SAME fainter grey as their dotted lines: placed plates take
   // the solid floor-plate colour, the preview takes the ghost colour.
   if (plates) for (const y of plates) {
-    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y }).y, fmtFeetPrime(y), tk.floorPlate);
+    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y }).y, fmtLengthTick(y), tk.floorPlate);
   }
   if (preview != null) {
-    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y: preview }).y, fmtFeetPrime(preview), tk.floorPlateGhost);
+    drawRightAlignedLabel(ctx, canvas, rightX, toScreen(vp, { x: leftModelX, y: preview }).y, fmtLengthTick(preview), tk.floorPlateGhost);
   }
 }
 
@@ -714,12 +714,14 @@ function drawSegmentLabel(
   b: Point,
   length: number,
   angle: number,
-  // When set, the length portion shows this raw string (with a foot tick) instead of
-  // the formatted measurement, and the label is drawn ACCENTED — used for the live
-  // Revit-style typed-dimension entry so it reads as an active input, not a readout.
+  // When set, the length portion shows this raw string (with the active unit tick)
+  // instead of the formatted measurement, and the label is drawn ACCENTED — used for
+  // the live Revit-style typed-dimension entry so it reads as an active input. The raw
+  // string is what the user TYPED (already in the active display unit), so it just gets
+  // the active tick (′ for feet, m for metric) appended.
   lengthOverride?: string,
 ): void {
-  const lenStr = lengthOverride != null ? `${lengthOverride}′` : fmtFeetPrime(length);
+  const lenStr = lengthOverride != null ? `${lengthOverride}${lengthTick()}` : fmtLengthTick(length);
   const text = `${lenStr}  ∠${angle.toFixed(1)}°`;
   const midX = (a.x + b.x) / 2;
   const midY = (a.y + b.y) / 2;
@@ -1239,7 +1241,7 @@ function drawUnravel(
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
       }
-      drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - tk.unravelLabelGap, `↔ ${fmtFeetPrime(mv)}`);
+      drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - tk.unravelLabelGap, `↔ ${fmtLengthTick(mv)}`);
     } else if (mullionHoverAxis === "h" && gridYs.length > 0) {
       ctx.strokeStyle = tk.highlight;
       ctx.lineWidth = tk.highlightW;
@@ -1251,7 +1253,7 @@ function drawUnravel(
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
       }
-      drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - tk.unravelLabelGap, `↕ ${fmtFeetPrime(mh)}`);
+      drawCenteredLabel(ctx, canvas, (baseL.x + baseR.x) / 2, topL.y - tk.unravelLabelGap, `↕ ${fmtLengthTick(mh)}`);
     }
 
     // UNITIZED per-cell FRAMING (Framing tool under the Unitized system): every cell
@@ -1333,7 +1335,7 @@ function drawUnravel(
       }
       if (fh.offset > 0) {
         const cx = toScreen(vp, { x: (fh.x0 + fh.x1) / 2, y: (fh.y0 + fh.y1) / 2 });
-        drawCenteredLabel(ctx, canvas, cx.x, cx.y, `⊣ ${fmtFeetPrime(fh.offset)}`);
+        drawCenteredLabel(ctx, canvas, cx.x, cx.y, `⊣ ${fmtLengthTick(fh.offset)}`);
       }
     }
 
@@ -1399,9 +1401,9 @@ function drawUnravel(
         const mx = (a.x + b.x) / 2;
         const my = (a.y + b.y) / 2;
         if (Math.abs(dx) >= Math.abs(dy)) {
-          drawCenteredLabel(ctx, canvas, mx, Math.min(a.y, b.y) - tk.unravelLabelGap, fmtFeetPrime(dim.dist));
+          drawCenteredLabel(ctx, canvas, mx, Math.min(a.y, b.y) - tk.unravelLabelGap, fmtLengthTick(dim.dist));
         } else {
-          drawCenteredLabel(ctx, canvas, mx, my + 8, fmtFeetPrime(dim.dist));
+          drawCenteredLabel(ctx, canvas, mx, my + 8, fmtLengthTick(dim.dist));
         }
       }
     }
@@ -1474,7 +1476,7 @@ function drawUnravel(
         canvas,
         (baseL.x + baseR.x) / 2,
         topL.y - tk.unravelLabelGap,
-        fmtFeetPrime(seg.length),
+        fmtLengthTick(seg.length),
         selected ? tk.floorPlate : undefined,
       );
     }
@@ -1516,7 +1518,7 @@ function drawUnravel(
           canvas,
           toScreen(vp, { x: center, y: 0 }).x,
           topL.y - tk.unravelLabelGap,
-          fmtFeetPrime(vx[i + 1] - vx[i]),
+          fmtLengthTick(vx[i + 1] - vx[i]),
           selected ? tk.floorPlate : undefined,
         );
       }
@@ -1529,7 +1531,7 @@ function drawUnravel(
           canvas,
           baseL.x - tk.unravelLabelGap,
           toScreen(vp, { x: seg.x0, y: center }).y,
-          fmtFeetPrime(vy[j + 1] - vy[j]),
+          fmtLengthTick(vy[j + 1] - vy[j]),
           rowColor,
         );
       }
@@ -1569,15 +1571,15 @@ function drawUnravel(
     // selection below stays so Assembly-phase edge targeting still works as an affordance).
     if (!clean && !shadows) {
       // TOP (width): centred above the top edge, its bottom edge one gap up.
-      drawCenteredLabel(ctx, canvas, centerX, tl.y - tk.unravelLabelGap, fmtFeetPrime(width));
+      drawCenteredLabel(ctx, canvas, centerX, tl.y - tk.unravelLabelGap, fmtLengthTick(width));
       // BOTTOM (width): centred below the bottom edge. drawCenteredLabel sits the
       // label's BOTTOM at the passed y, so add the gap + the label height to park it
       // just below the edge.
-      drawCenteredLabel(ctx, canvas, centerX, bl.y + tk.unravelLabelGap + labelH, fmtFeetPrime(width));
+      drawCenteredLabel(ctx, canvas, centerX, bl.y + tk.unravelLabelGap + labelH, fmtLengthTick(width));
       // LEFT (height): right-aligned one gap left of the left edge, vertically centred.
-      drawRightAlignedLabel(ctx, canvas, tl.x - tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
+      drawRightAlignedLabel(ctx, canvas, tl.x - tk.unravelLabelGap, centerY, fmtLengthTick(height), labelColor);
       // RIGHT (height): left-aligned one gap right of the right edge, vertically centred.
-      drawLeftAlignedLabel(ctx, canvas, tr.x + tk.unravelLabelGap, centerY, fmtFeetPrime(height), labelColor);
+      drawLeftAlignedLabel(ctx, canvas, tr.x + tk.unravelLabelGap, centerY, fmtLengthTick(height), labelColor);
     }
 
     // Hovered edge: stroke that ONE edge red (heavier width) to mark the selection.

@@ -39,7 +39,18 @@ import { defaultViewport, toScreen, toModel, pixelsToModel, zoomAt, pan, fitView
 import { render, type RenderState, type UnravelDraw } from "./core/renderer";
 import { unravelPerimeter, unravelBoundsPerimeter, buildEqualColumns, buildEqualRows, type UnravelSegment } from "./core/unravel";
 import { DEFAULT_WALL_HEIGHT_FT } from "./core/extrude3d";
-import { UNIT_ABBR, UNIT_AREA_ABBR, UNIT_PRIME } from "./core/units";
+import {
+  fmtLength,
+  fmtArea,
+  fmtLengthTick,
+  toDisplayLength,
+  fromDisplayLength,
+  lengthAbbr,
+  getUnitSystem,
+  setUnitSystem,
+  persistUnitSystem,
+  type UnitSystem,
+} from "./core/units";
 import {
   loadSaved,
   persistSaved,
@@ -455,7 +466,7 @@ export default function PolylineTool() {
 
   // --- SETTINGS POPUP ---
   // The gear button at the top-right of the nav header toggles a draggable Settings
-  // popup (same chrome as the Solar Study popup). Blank for now apart from its title.
+  // popup (same chrome as the Solar Study popup) holding the Units category.
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Attention flash: triggered when the user clicks outside the Settings popup.
   const [settingsFlashing, setSettingsFlashing] = useState(false);
@@ -464,6 +475,20 @@ export default function PolylineTool() {
     if (settingsFlashTimer.current) clearTimeout(settingsFlashTimer.current);
     setSettingsFlashing(true);
     settingsFlashTimer.current = setTimeout(() => setSettingsFlashing(false), 400);
+  }, []);
+
+  // Active DISPLAY unit (feet ↔ metric). Geometry is always stored in feet; this only
+  // controls how lengths/areas are formatted and how typed input is parsed. Seeded from
+  // the module-level value in core/units (already loaded from the persisted preference),
+  // so the first paint matches the saved choice. Mirrored into React state so changing
+  // it re-renders the DOM readouts AND re-runs the canvas paint effect (it's a dep).
+  const [unitSystem, setUnitSystemState] = useState<UnitSystem>(() => getUnitSystem());
+  // Apply a unit choice everywhere: update the module-level value the renderer + all
+  // formatters read, persist it, then bump React state to repaint. No geometry changes.
+  const applyUnitSystem = useCallback((u: UnitSystem) => {
+    setUnitSystem(u);
+    persistUnitSystem(u);
+    setUnitSystemState(u);
   }, []);
 
   // --- LEFT TOOL PANEL COLLAPSE ---
@@ -778,7 +803,9 @@ export default function PolylineTool() {
       const raw = unravelInputDraft[edge];
       if (raw !== undefined && raw.trim() !== "") {
         recordHistory();
-        setPanelHeight(edge, clampHeight(parseFloat(raw)));
+        // The field is typed in the active display unit; convert to model feet before
+        // clamping/storing so the stored geometry stays in feet regardless of unit.
+        setPanelHeight(edge, clampHeight(fromDisplayLength(parseFloat(raw))));
       }
       setUnravelInputDraft((prev) => {
         const next = { ...prev };
@@ -859,7 +886,8 @@ export default function PolylineTool() {
    */
   const dimPreview = useMemo<Point | null>(() => {
     if (dimInput === null) return null;
-    const len = parseFloat(dimInput);
+    // The user types in the active display unit; convert to model feet for geometry.
+    const len = fromDisplayLength(parseFloat(dimInput));
     if (!isFinite(len) || len <= 0) return null;
     const v = perimeter.vertices;
     if (v.length === 0 || !cursorModel) return null;
@@ -881,7 +909,8 @@ export default function PolylineTool() {
   const commitDimVertex = useCallback(() => {
     const raw = dimInputRef.current;
     if (raw === null) return false;
-    const len = parseFloat(raw);
+    // Typed in the active display unit; convert to model feet for the placed vertex.
+    const len = fromDisplayLength(parseFloat(raw));
     const v = docRef.current.perimeter.vertices;
     const cur = cursorRef.current;
     if (!isFinite(len) || len <= 0 || v.length === 0 || !cur) {
@@ -3595,6 +3624,9 @@ export default function PolylineTool() {
     // Clean/Shadows views repaint the panels white and hide centerlines/dimensions
     // (floor lines follow the Floor Lines submenu, not the view mode).
     cellViewMode,
+    // Repaint every on-canvas dimension label when the display unit changes (the
+    // renderer's formatters read the active unit from core/units at paint time).
+    unitSystem,
   ]);
 
   useEffect(() => {
@@ -4312,13 +4344,14 @@ export default function PolylineTool() {
                 const draft = unravelInputDraft[seg.index];
                 const focused = focusedUnravelInput === seg.index;
                 // Display swap (function before aesthetic): while EDITING (focused
-                // or an in-progress draft) show the PLAIN number so typing and
-                // numeric parsing on commit work normally; while IDLE show the
-                // value WITH the foot tick `′` via UNIT_PRIME so it reads like the
-                // canvas WIDTH label (fmtFeetPrime uses 2 decimals — match that).
+                // or an in-progress draft) show the PLAIN number — in the active
+                // display unit — so typing and numeric parsing on commit work
+                // normally; while IDLE show the value WITH the active unit tick via
+                // fmtLengthTick so it reads like the canvas WIDTH label (2 decimals).
+                // `height` is model feet; both the plain value and the tag convert.
                 const editing = focused || draft !== undefined;
-                const plain = draft !== undefined ? draft : String(Number(height.toFixed(3)));
-                const value = editing ? plain : `${height.toFixed(2)}${UNIT_PRIME}`;
+                const plain = draft !== undefined ? draft : String(Number(toDisplayLength(height).toFixed(3)));
+                const value = editing ? plain : fmtLengthTick(height);
                 // When this panel is the double-click-SELECTED one (the Additive /
                 // Subtractive target), recolour its HEIGHT field to the same faint
                 // floor-plate grey the renderer uses for its WIDTH label, so BOTH
@@ -4384,15 +4417,15 @@ export default function PolylineTool() {
                 </div>
                 <div className="readout">
                   <span className="readout__key">Unwrapped length</span>
-                  <span className="readout__val">{unravelResult.totalLength.toFixed(3)} {UNIT_ABBR}</span>
+                  <span className="readout__val">{fmtLength(unravelResult.totalLength, 3)}</span>
                 </div>
                 <div className="readout">
                   <span className="readout__key">Total area</span>
                   <span className="readout__val">
-                    {unravelResult.segments
-                      .reduce((sum, s) => sum + s.length * effectiveHeight(s.index), 0)
-                      .toFixed(3)}{" "}
-                    {UNIT_AREA_ABBR}
+                    {fmtArea(
+                      unravelResult.segments.reduce((sum, s) => sum + s.length * effectiveHeight(s.index), 0),
+                      3,
+                    )}
                   </span>
                 </div>
                 <div className="readout">
@@ -4527,8 +4560,10 @@ export default function PolylineTool() {
               </div>
             </>
           )}
-          {/* SETTINGS popup — same chrome as the Solar Study popup; blank body for now.
-              Anchored in .canvas-wrap (its positioning context) like the other overlays. */}
+          {/* SETTINGS popup — same chrome as the Solar Study popup; holds the Units
+              category. Anchored in .canvas-wrap (its positioning context) like the
+              other overlays. Saving applies the display unit app-wide (geometry stays
+              in feet — applyUnitSystem only changes formatting/parsing). */}
           {settingsOpen && (
             <>
               <div className="modal-backdrop" onClick={handleSettingsBackdrop} />
@@ -4536,19 +4571,24 @@ export default function PolylineTool() {
                 onClose={() => setSettingsOpen(false)}
                 stageRef={wrapRef}
                 isFlashing={settingsFlashing}
+                unitSystem={unitSystem}
+                onSave={applyUnitSystem}
               />
             </>
           )}
         </div>
         <div className="statusbar">
           <span className="statusbar__item">
-            X {cursorModel ? cursorModel.x.toFixed(3) : "—"}
+            X {cursorModel ? toDisplayLength(cursorModel.x).toFixed(3) : "—"}
           </span>
           <span className="statusbar__item">
-            Y {cursorModel ? cursorModel.y.toFixed(3) : "—"}
+            Y {cursorModel ? toDisplayLength(cursorModel.y).toFixed(3) : "—"}
           </span>
           <span className="statusbar__spacer" />
-          <span className="statusbar__item">Zoom {viewport.scale.toFixed(0)} px/{UNIT_ABBR}</span>
+          {/* Zoom is px per model FOOT; show px per active display unit (× feet-per-unit). */}
+          <span className="statusbar__item">
+            Zoom {(viewport.scale * fromDisplayLength(1)).toFixed(0)} px/{lengthAbbr()}
+          </span>
         </div>
       </main>
     </div>
@@ -4604,7 +4644,7 @@ function ControlsList() {
       <li><b>Overview map</b> (bottom-left) shows the whole shape — the footprint in draw/edit, the unrolled panel strip in unravel — with a rectangle marking your current view · drag the grip strip to move</li>
       <li><b>Location</b> (left panel) type an address to geo-locate the sketch · optional — blank by default · saved with the sketch</li>
       <li><b>New project</b> (＋ at the top-left of the nav header, left of <b>Building Perimeter</b>) clears the canvas to a fresh, blank project — like refreshing the page but without the onboarding hint · your <b>saved projects are kept</b></li>
-      <li><b>Settings</b> (⚙ at the top-right of the nav header) opens a draggable Settings popup (drag its title bar to move · Esc or × to close) — blank for now</li>
+      <li><b>Settings</b> (⚙ at the top-right of the nav header) opens a draggable Settings popup (drag its title bar to move · Esc or × to close) with a category rail on the left (<b>Units</b>) · under Units, a <b>Feet ′ / Metric m</b> length-unit switch · click <b>Save</b> (bottom-right) to apply the unit to every dimension across the app (drawings, statistics, minimap, elevations, walls, cells) — the geometry is unchanged, only the units shown</li>
       <li><b>Collapse panel</b> (◂ / ▸ at the bottom-left corner) hides or shows the left tool panel to give the canvas more room</li>
       <li><b>Edit a loaded entry</b> footprint and elevation-view edits auto-save to that entry (no manual save) · the mini-window's <b>＋ footer</b> always creates a new entry instead</li>
     </ul>

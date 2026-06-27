@@ -31,7 +31,7 @@ import type { SavedPerimeter, LocationInfo } from "./core/savedPerimeters";
 import { savedStats } from "./core/savedPerimeters";
 import type { SolarSettings } from "./core/solar";
 import { render3d, DEFAULT_CAMERA, PLAN_CAMERA, type Camera } from "./core/extrude3d";
-import { UNIT_ABBR, UNIT_AREA_ABBR } from "./core/units";
+import { fmtLength, fmtArea } from "./core/units";
 import { easeInOut, shortestAngleDelta } from "./core/viewport";
 import SolarStudy from "./SolarStudy";
 
@@ -636,8 +636,8 @@ function Thumb({ saved, active, onLoad, onDelete, onDuplicate, onRename, onOpenS
           </button>
         )}
         <div className="mini__stats">
-          {stats.length.toFixed(1)} {UNIT_ABBR}
-          {saved.perimeter.closed ? ` · ${stats.area.toFixed(1)} ${UNIT_AREA_ABBR}` : ""}
+          {fmtLength(stats.length, 1)}
+          {saved.perimeter.closed ? ` · ${fmtArea(stats.area, 1)}` : ""}
         </div>
       </div>
 
