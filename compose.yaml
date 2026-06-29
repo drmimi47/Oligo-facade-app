@@ -1,0 +1,10 @@
+services:
+  oligo:
+    build: .
+    restart: unless-stopped
+    # ALLOWED_HOSTS (public hostname for the Vite dev server) — created by the deploy
+    # workflow. Oligo is client-only with no API keys, so there are no secrets here.
+    env_file: .env
+    # Bound to localhost only — the VM's existing nginx proxies to this port.
+    ports:
+      - "127.0.0.1:5180:5180"
