@@ -160,6 +160,23 @@ export function sunDirectionModel(pos: SunPosition, northOffsetDeg: number): V3 
 }
 
 /**
+ * Cosine of the ANGLE OF INCIDENCE between the sun's beam and a VERTICAL wall's
+ * OUTWARD normal, for a wall whose normal points along `wallBearingDeg` (deg, 0 = N,
+ * CW — the same per-face bearing the Orientation Heatmap uses). For a vertical surface
+ * this reduces to cos(altitude)·cos(Δazimuth). Range [−1, 1]:
+ *   1  → sun square-on the wall (beam perpendicular, maximum direct gain),
+ *   0  → beam grazes the wall (or the sun is on the horizon),
+ *   ≤0 → sun is BEHIND the wall — the face is in self-shade, so no direct beam.
+ * This is the SAME cosine projection that scales direct-normal irradiance onto the
+ * facade in core/radiation.ts; it is factored out here so the Orientation Heatmap's
+ * live direct-sun readout and the radiation model share one definition of incidence.
+ */
+export function wallIncidenceCos(pos: SunPosition, wallBearingDeg: number): number {
+  const dAz = pos.azimuth - wallBearingDeg * DEG;
+  return Math.cos(pos.altitude) * Math.cos(dAz);
+}
+
+/**
  * Horizontal MODEL-space unit direction (z = 0) for a true-compass bearing, given the
  * sketch's `northOffset`. Used to place the N/E/S/W markers of the compass rose.
  */

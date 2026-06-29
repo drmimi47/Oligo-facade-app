@@ -174,6 +174,12 @@
   /* Cardinal-direction labels (N, NE, S, …) are drawn with an inverted 'difference'
      blend so they auto-contrast against the heatmap hue behind each cell — no fixed
      colour token (their colour is derived from the background, like an inverted cursor). */
+  /* DIRECT-SUN readout: a smaller second label line under the cardinal showing the live
+     direct-beam incidence on the facade (cos of the sun's angle of incidence, as a % —
+     100% = sun square-on, 0% = grazing/self-shaded, "—" = night) at the Solar Study's
+     current day + hour. Subordinate to the cardinal, so a smaller font; same inverted
+     'difference' blend, so no colour token. Only drawn on cells tall enough for two lines. */
+  --orient-sun-font: 10px ui-monospace, monospace;
 
   /* === FLOOR PLATES (horizontal level reference lines) ===
      Dotted horizontal lines placed via the "floor plate" tool. Shown in both the
@@ -386,7 +392,8 @@
      Sits just above the help button (bottom-right). Surfaces/borders/shadow reuse
      the mini-window token family so it matches the other floating overlays. */
   --help-popup-width: 320px;              /* Popup width */
-  --help-popup-gap: var(--space-2);       /* Gap between the popup and the "?" button */
+  --help-popup-gap: var(--space-2);       /* Gap between the popup (and the topic submenu) and the "?" button */
+  --help-menu-min-width: 168px;           /* Min width of the topic submenu above the "?" button */
   --help-popup-clearance: var(--space-3); /* Minimum clear gap kept between the popup's TOP and the minimap's BOTTOM edge */
   /* Cap height so the popup's TOP stays BELOW the minimap (both share the canvas
      right column — the popup is anchored bottom-right and grows upward, the
@@ -991,6 +998,10 @@ input[type="checkbox"] {
   line-height: 1.4;
 }
 .help b { color: var(--color-text); font-weight: 600; }
+/* The "How:" technical clause in the Statistics Info / View Modes Info panels —
+   visually subordinate to the plain-language summary so each entry reads as a one-line
+   definition followed by the computation detail. */
+.help__how { color: var(--color-text-dim); font-style: italic; }
 
 /* === RIGHT STAGE (canvas + status bar) === */
 .stage {
@@ -1529,10 +1540,12 @@ input[type="checkbox"] {
   box-shadow: var(--mini-shadow);
 }
 .help-btn:hover { background: var(--control-bg-hover); }
+/* Active (submenu / a reference panel open) reads as a NEUTRAL GREY press — not the
+   blue accent the other tool buttons use — so the help control stays visually quiet. */
 .help-btn.is-active {
-  background: var(--control-bg-active);
-  border-color: var(--control-bg-active);
-  color: var(--color-text-on-accent);
+  background: var(--control-bg-hover);
+  border-color: var(--control-border);
+  color: var(--control-text);
 }
 
 /* BOTTOM-RIGHT tool cluster (Eraser · Dim) — lifted out of the bottom-left tool
@@ -1618,6 +1631,42 @@ input[type="checkbox"] {
   min-height: 0;
   padding: var(--space-2);
 }
+
+/* === HELP TOPIC SUBMENU ===
+   The small chooser that pops up directly ABOVE the "?" button when it's clicked. Lists
+   the three reference panels (Control List · Statistics Info · View Modes Info); picking
+   one opens the matching .help-popup. Positioned like .help-popup (same right offset,
+   parked above the button) and styled like the other dropdown menus (.view-menu /
+   .cw-menu) so the affordance reads consistently across the app. */
+.help-menu {
+  position: absolute;
+  right: var(--help-btn-offset);
+  bottom: calc(var(--help-btn-offset) + var(--help-btn-size) + var(--help-popup-gap));
+  z-index: 61;                      /* above the transparent backdrop, like .help-popup */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: var(--help-menu-min-width);
+  padding: var(--space-1);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  box-shadow: var(--mini-shadow);
+  white-space: nowrap;
+}
+.help-menu__btn {
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--control-text);
+  font-size: var(--font-size-base);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.help-menu__btn:hover { background: var(--control-bg-hover); }
 
 /* === UNRAVEL · PER-PANEL HEIGHT INPUT OVERLAY ===
    DOM layer of <input> fields, one per unravel rectangle, absolutely positioned

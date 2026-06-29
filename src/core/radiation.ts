@@ -35,9 +35,7 @@
  *   - `hour` is LOCAL APPARENT SOLAR TIME (solar noon = 12:00), matching core/solar.ts.
  */
 
-import { sunPosition, type SolarSettings } from "./solar";
-
-const DEG = Math.PI / 180;
+import { sunPosition, wallIncidenceCos, type SolarSettings } from "./solar";
 
 /** Solar constant — mean extraterrestrial normal irradiance (W/m²). */
 const SOLAR_CONSTANT = 1367;
@@ -123,10 +121,9 @@ export function wallIrradiance(
   // Global horizontal (for the ground-reflected term).
   const ghi = dni * cosZ + dhi;
 
-  // BEAM on the wall: cosθ for a VERTICAL surface = cos(altitude)·cos(Δazimuth).
-  // azimuth is radians CW from north; wall bearing is degrees CW from north.
-  const dAz = pos.azimuth - wallBearingDeg * DEG;
-  const cosInc = Math.cos(pos.altitude) * Math.cos(dAz);
+  // BEAM on the wall: cosθ for a VERTICAL surface (the shared incidence projection,
+  // also driving the Orientation Heatmap's live direct-sun readout).
+  const cosInc = wallIncidenceCos(pos, wallBearingDeg);
   const beam = cosInc > 0 ? dni * cosInc : 0; // sun behind the wall → no beam
 
   // Vertical surface view factors: sky = (1+cos90)/2 = 0.5, ground = (1−cos90)/2 = 0.5.

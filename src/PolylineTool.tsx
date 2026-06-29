@@ -71,7 +71,13 @@ import {
   type LocationInfo,
   type CellInsets,
 } from "./core/savedPerimeters";
-import { cloneSolarSettings, defaultSolarSettings, type SolarSettings } from "./core/solar";
+import {
+  cloneSolarSettings,
+  defaultSolarSettings,
+  sunPosition,
+  wallIncidenceCos,
+  type SolarSettings,
+} from "./core/solar";
 import { buildRadiationMatrix } from "./core/radiation";
 import RadiationDiagram from "./RadiationDiagram";
 import InsolationChart from "./InsolationChart";
@@ -121,6 +127,18 @@ const CELL_VIEW_LABELS: Record<CellViewMode, string> = {
   shadows: "Shadows",
 };
 
+/**
+ * The "?" help button opens a submenu that picks ONE of three reference panels. Each
+ * panel reuses the same floating-popup chrome; only its title + body differ.
+ */
+type HelpPanel = "controls" | "stats" | "views";
+/** Title shown (UPPERCASED by CSS) at the top-left of each help reference panel. */
+const HELP_PANEL_TITLE: Record<HelpPanel, string> = {
+  controls: "Control List",
+  stats: "Statistics Info",
+  views: "View Modes Info",
+};
+
 /** 8-point compass labels, indexed by round(bearing / 45) — N at 0°, clockwise. */
 const CARDINALS_8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
 
@@ -141,6 +159,27 @@ function bearingToCardinal8(bearingDeg: number): string {
 function bearingToHeatT(bearingDeg: number): number {
   const b = ((bearingDeg % 360) + 360) % 360;
   return b <= 270 ? b / 270 : 1 - (b - 270) / 90;
+}
+
+/**
+ * LIVE direct-sun readout for the Orientation Heatmap — the second label line under
+ * each cell's cardinal. Given a facade's true compass bearing and the active Solar
+ * Study settings, reports how much of the DIRECT beam the facade catches RIGHT NOW
+ * (the studied day + hour): the cosine of the sun's angle of incidence on the wall,
+ * as a percentage (the industry-standard "direct exposure factor" that scales beam
+ * solar gain). It is constant across a panel's cells — they share the wall plane — so
+ * every cell of a facade shows the same value, and it updates live as the Solar Study
+ * sun is scrubbed. Returns:
+ *   "—"   when the sun is BELOW the horizon (night — no direct sun on any facade),
+ *   "0%"  when the sun is up but BEHIND the wall (self-shaded — no direct beam),
+ *   "NN%" otherwise (100% = sun square-on the facade, the harshest direct load).
+ */
+function sunHitLabel(bearingDeg: number, solar: SolarSettings): string {
+  const pos = sunPosition(solar.latitude, solar.dayOfYear, solar.hour);
+  if (pos.altitude <= 0) return "—"; // sun below horizon → no direct sun anywhere
+  const f = wallIncidenceCos(pos, bearingDeg);
+  if (f <= 0) return "0%"; // sun behind the facade → self-shaded
+  return `${Math.round(f * 100)}%`;
 }
 /**
  * Rounding step (feet) used to BUCKET cell shapes into "same shape" groups for the
@@ -561,11 +600,19 @@ export default function PolylineTool() {
   }, [showHint]);
 
   // --- HELP POPUP ---
-  // The bottom-right "?" button toggles a floating panel listing every control /
-  // keybinding (the docs that used to live in the left panel). Open/close is
-  // explicit and predictable: the button toggles it, and a close button, an
-  // outside click, or Escape dismisses it.
-  const [helpOpen, setHelpOpen] = useState(false);
+  // The bottom-right "?" button opens a small submenu (helpMenuOpen) ABOVE itself that
+  // picks ONE of three reference panels (helpPanel): the control list, the statistics
+  // info, or the view-modes info. The submenu and a panel are mutually exclusive
+  // (opening one closes the other). `helpOpen` (derived) means "any help UI is showing"
+  // — it drives the button's active state and lets the global key handler defer Escape.
+  // Each panel is dismissed by its close button, an outside click, or Escape.
+  const [helpMenuOpen, setHelpMenuOpen] = useState(false);
+  const [helpPanel, setHelpPanel] = useState<HelpPanel | null>(null);
+  const helpOpen = helpMenuOpen || helpPanel !== null;
+  const closeHelp = () => {
+    setHelpMenuOpen(false);
+    setHelpPanel(null);
+  };
 
   // --- SMART SEARCH ---
   const [searchQuery, setSearchQuery] = useState("");
@@ -612,6 +659,16 @@ export default function PolylineTool() {
   // General / Irradiance / Insolation options).
   const [statsMode, setStatsMode] = useState<"none" | "general" | "irradiance" | "insolation">("none");
   const [statsMenuOpen, setStatsMenuOpen] = useState(false);
+  // The statistics selection is SHARED across views, but only for stats that exist on
+  // BOTH sides. "General" reads in the Building Perimeter and the unravel/elevation
+  // views alike, so it carries over. The solar diagrams (Irradiance / Insolation) are
+  // wall-orientation reads with no footprint meaning, so outside the unravel views the
+  // EFFECTIVE mode collapses to "none" — the Building Perimeter shows nothing for them.
+  // `statsMode` itself is left untouched so the solar pick is restored on return to the
+  // elevations; this derived value drives the button label, the menu active-state, and
+  // the overlay render conditions so all three agree per view.
+  const effectiveStatsMode =
+    !unravelOn && (statsMode === "irradiance" || statsMode === "insolation") ? "none" : statsMode;
 
   // --- TRANSIENT INTERACTION STATE ---
   const [cursorModel, setCursorModel] = useState<Point | null>(null);
@@ -1348,10 +1405,13 @@ export default function PolylineTool() {
           }))
         : undefined;
       // ORIENTATION HEATMAP: tint each cell by its panel's facing direction (heat
-      // scalar t) and label it with the cardinal. All cells of a panel share the
-      // panel's outward-normal bearing — they are the same wall plane. Panels with no
-      // resolvable bearing (open polyline) are left untinted.
+      // scalar t) and label it with the cardinal PLUS the live direct-sun incidence
+      // (`sun`). All cells of a panel share the panel's outward-normal bearing — they
+      // are the same wall plane — so both the colour and the sun reading are constant
+      // across the grid; the sun reading is computed once per panel here. Panels with
+      // no resolvable bearing (open polyline) are left untinted.
       const bearing = faceBearings[edge];
+      const sunHit = bearing !== undefined ? sunHitLabel(bearing, activeSolar) : undefined;
       const cellOrient: NonNullable<UnravelDraw["cellOrient"]> | undefined =
         orientView && bearing !== undefined
           ? cells.map((c) => ({
@@ -1361,6 +1421,7 @@ export default function PolylineTool() {
               y1: c.y1,
               t: bearingToHeatT(bearing),
               label: bearingToCardinal8(bearing),
+              sun: sunHit,
             }))
           : undefined;
       return {
@@ -1381,6 +1442,7 @@ export default function PolylineTool() {
     cellViewMode,
     cellShapeColors,
     faceBearings,
+    activeSolar,
     focusedPanel,
     focusedCell,
     cellsForEdge,
@@ -3868,7 +3930,8 @@ export default function PolylineTool() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        setHelpOpen(false);
+        setHelpMenuOpen(false);
+        setHelpPanel(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -4767,7 +4830,10 @@ export default function PolylineTool() {
                 const modes: typeof statsMode[] = unravelOn
                   ? ["none", "general", "irradiance", "insolation"]
                   : ["none", "general"];
-                const idx = modes.indexOf(statsMode);
+                // Index off the EFFECTIVE (displayed) mode so cycling in the Building
+                // Perimeter view starts from what's shown — a carried-over solar pick
+                // reads as "none" there, not an off-list index.
+                const idx = modes.indexOf(effectiveStatsMode);
                 const next =
                   e.deltaY > 0
                     ? (idx + 1) % modes.length
@@ -4792,22 +4858,22 @@ export default function PolylineTool() {
                 aria-haspopup="true"
                 aria-expanded={statsMenuOpen}
               >
-                Statistics: {statsMode === "none" ? "None" : statsMode === "general" ? "General" : statsMode === "irradiance" ? "Irradiance (W/m²)" : "Insolation (kWh/m²)"} ▾
+                Statistics: {effectiveStatsMode === "none" ? "None" : effectiveStatsMode === "general" ? "General" : effectiveStatsMode === "irradiance" ? "Irradiance (W/m²)" : "Insolation (kWh/m²)"} ▾
               </button>
               {statsMenuOpen && (
                 <div className="view-menu" role="menu">
                   <button
-                    className={`view-menu__btn ${statsMode === "none" ? "is-active" : ""}`}
+                    className={`view-menu__btn ${effectiveStatsMode === "none" ? "is-active" : ""}`}
                     role="menuitemradio"
-                    aria-checked={statsMode === "none"}
+                    aria-checked={effectiveStatsMode === "none"}
                     onClick={() => { setStatsMode("none"); setStatsMenuOpen(false); }}
                   >
                     None
                   </button>
                   <button
-                    className={`view-menu__btn ${statsMode === "general" ? "is-active" : ""}`}
+                    className={`view-menu__btn ${effectiveStatsMode === "general" ? "is-active" : ""}`}
                     role="menuitemradio"
-                    aria-checked={statsMode === "general"}
+                    aria-checked={effectiveStatsMode === "general"}
                     onClick={() => { setStatsMode("general"); setStatsMenuOpen(false); }}
                   >
                     General
@@ -4817,9 +4883,9 @@ export default function PolylineTool() {
                       in the Building Perimeter tab. Irradiance = the month×hour W/m² heatmap;
                       Insolation = its monthly kWh/m² energy companion. */}
                   <button
-                    className={`view-menu__btn ${statsMode === "irradiance" ? "is-active" : ""}`}
+                    className={`view-menu__btn ${effectiveStatsMode === "irradiance" ? "is-active" : ""}`}
                     role="menuitemradio"
-                    aria-checked={statsMode === "irradiance"}
+                    aria-checked={effectiveStatsMode === "irradiance"}
                     disabled={!unravelOn}
                     title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
                     onClick={() => { setStatsMode("irradiance"); setStatsMenuOpen(false); }}
@@ -4827,9 +4893,9 @@ export default function PolylineTool() {
                     Irradiance (W/m²)
                   </button>
                   <button
-                    className={`view-menu__btn ${statsMode === "insolation" ? "is-active" : ""}`}
+                    className={`view-menu__btn ${effectiveStatsMode === "insolation" ? "is-active" : ""}`}
                     role="menuitemradio"
-                    aria-checked={statsMode === "insolation"}
+                    aria-checked={effectiveStatsMode === "insolation"}
                     disabled={!unravelOn}
                     title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
                     onClick={() => { setStatsMode("insolation"); setStatsMenuOpen(false); }}
@@ -5136,7 +5202,7 @@ export default function PolylineTool() {
               wall border is selected (focusedPanel), it re-anchors to that border's left
               edge instead, left-aligned with the same spacing. Tracks the viewport so it
               pans/zooms with the canvas content. */}
-          {statsMode === "general" && unravelOn && unravelResult && unravelResult.segments.length > 0 && (() => {
+          {effectiveStatsMode === "general" && unravelOn && unravelResult && unravelResult.segments.length > 0 && (() => {
             // Anchor segment: the selected wall border if one is focused, else the
             // left-most panel. A stale focus (border no longer present) falls back too.
             const anchorSeg =
@@ -5185,7 +5251,7 @@ export default function PolylineTool() {
               the Orientation Heatmap, so the diagrams are real per-facade data. They share
               one matrix (the chart reads its monthlyTotals, the heatmap its cell grid).
               Tracks the viewport so it pans/zooms with the canvas; renders BEHIND the minimap. */}
-          {(statsMode === "irradiance" || statsMode === "insolation") &&
+          {(effectiveStatsMode === "irradiance" || effectiveStatsMode === "insolation") &&
             unravelOn &&
             unravelResult &&
             unravelResult.segments.length > 0 &&
@@ -5219,7 +5285,7 @@ export default function PolylineTool() {
               most y (curve-accurate extents, so a bulging curve is respected), offset DOWN
               so the box clears the drawn shape without overlapping it. Tracks the viewport,
               so it pans/zooms with the canvas. */}
-          {statsMode === "general" && !unravelOn && perimeter.closed && (() => {
+          {effectiveStatsMode === "general" && !unravelOn && perimeter.closed && (() => {
             const outline = flattenPerimeter(perimeter);
             if (outline.length === 0) return null;
             let minX = Infinity;
@@ -5418,48 +5484,85 @@ export default function PolylineTool() {
               />
             </div>
           </div>
-          {/* HELP "?" button — floats at the BOTTOM-RIGHT of the canvas (anchored
-              in .canvas-wrap like the floor-plate / history clusters). Toggles the
-              controls/keybindings popup. */}
+          {/* HELP "?" button — floats at the BOTTOM-RIGHT of the canvas (anchored in
+              .canvas-wrap like the floor-plate / history clusters). Clicking it opens a
+              small submenu ABOVE itself to choose which reference to read; picking one
+              opens a panel with the same chrome as the other floating overlays. The
+              submenu and a panel never show together. */}
+          {helpMenuOpen && (
+            <div
+              className="help-backdrop"
+              onPointerDown={() => setHelpMenuOpen(false)}
+              aria-hidden="true"
+            />
+          )}
+          {helpMenuOpen && (
+            <div className="help-menu" role="menu" aria-label="Help topics">
+              <button
+                className="help-menu__btn"
+                role="menuitem"
+                onClick={() => { setHelpPanel("controls"); setHelpMenuOpen(false); }}
+              >
+                Control List
+              </button>
+              <button
+                className="help-menu__btn"
+                role="menuitem"
+                onClick={() => { setHelpPanel("stats"); setHelpMenuOpen(false); }}
+              >
+                Statistics Info
+              </button>
+              <button
+                className="help-menu__btn"
+                role="menuitem"
+                onClick={() => { setHelpPanel("views"); setHelpMenuOpen(false); }}
+              >
+                View Modes Info
+              </button>
+            </div>
+          )}
           <button
             className={`help-btn ${helpOpen ? "is-active" : ""}`}
-            onClick={() => setHelpOpen((on) => !on)}
-            title="Controls & keyboard shortcuts"
-            aria-label="Controls and keyboard shortcuts"
-            aria-expanded={helpOpen}
+            onClick={() => { setHelpMenuOpen((on) => !on); setHelpPanel(null); }}
+            title="Help & reference"
+            aria-label="Help and reference"
+            aria-haspopup="menu"
+            aria-expanded={helpMenuOpen}
           >
             ?
           </button>
-          {/* CONTROLS / HELP popup. Opened by the "?" button; closed by the "?"
-              button again, the × close button, clicking the backdrop, or Escape
-              (handled in an effect). The backdrop is a transparent full-canvas
-              click-catcher so an outside click dismisses the popup predictably
-              without darkening the workspace. */}
-          {helpOpen && (
+          {/* The selected reference panel. The title (top-left, UPPERCASED by CSS) names
+              the topic; the body renders the matching reference list. Closed by the ×
+              button, the backdrop, or Escape (handled in an effect). The backdrop is a
+              transparent full-canvas click-catcher so an outside click dismisses the
+              panel without darkening the workspace. */}
+          {helpPanel && (
             <>
               <div
                 className="help-backdrop"
-                onPointerDown={() => setHelpOpen(false)}
+                onPointerDown={closeHelp}
                 aria-hidden="true"
               />
               <div
                 className="help-popup"
                 role="dialog"
-                aria-label="Controls and keyboard shortcuts"
+                aria-label={HELP_PANEL_TITLE[helpPanel]}
               >
                 <div className="help-popup__titlebar">
-                  <span className="help-popup__title">Controls</span>
+                  <span className="help-popup__title">{HELP_PANEL_TITLE[helpPanel]}</span>
                   <button
                     className="help-popup__close"
-                    onClick={() => setHelpOpen(false)}
+                    onClick={closeHelp}
                     title="Close (Esc)"
-                    aria-label="Close controls"
+                    aria-label="Close"
                   >
                     ×
                   </button>
                 </div>
                 <div className="help-popup__body">
-                  <ControlsList />
+                  {helpPanel === "controls" && <ControlsList />}
+                  {helpPanel === "stats" && <StatisticsInfo />}
+                  {helpPanel === "views" && <ViewModesInfo />}
                 </div>
               </div>
             </>
@@ -5527,9 +5630,7 @@ function ControlsList() {
       <li><b>Wheel / pinch</b> zoom (at cursor) · <b>Middle-drag / Right-drag</b> pan</li>
       <li><b>Ctrl+Z / Ctrl+Y</b> undo / redo (Ctrl+Shift+Z also redoes)</li>
       <li><b>Ctrl+S</b> save perimeter → mini-window (top-right)</li>
-      <li><b>Statistics</b> (top, next to Redo) toggle a dropdown of live stats for the current view (perimeter, or unravel when in elevation) · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · Esc or re-click to close · stays open while you work · pick <b>General</b>, <b>Irradiance (W/m²)</b>, or <b>Insolation (kWh/m²)</b> · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu (skips the two solar diagrams outside the elevation views) ·in the unravel view the readout left-aligns under the <b>left-most</b> elevation by default, and re-anchors to the <b>left edge of the selected wall border</b> once you click one</li>
-      <li><b>Irradiance (W/m²)</b> (Statistics menu, elevation views only) draws a <b>Ladybug-style heatmap</b> on the selected wall border — <b>months</b> across, <b>hour of day</b> up the side, cells coloured by clear-sky solar <b>irradiance</b> (instantaneous power) on that wall · pulls the wall's true <b>cardinal orientation</b> and the <b>Solar Study</b> location/north so each elevation reads differently · shows the annual <b>kWh/m²·yr</b> total</li>
-      <li><b>Insolation (kWh/m²)</b> (Statistics menu, elevation views only) the energy companion to Irradiance — a <b>monthly bar chart</b> of the solar <b>energy</b> the same wall receives each month (Jan→Dec), bars coloured on the same cold→hot ramp so a tall warm bar reads as a high-radiation month · same orientation / Solar Study source and annual <b>kWh/m²·yr</b> total</li>
+      <li><b>Statistics</b> (top, next to Redo) opens a dropdown (chevron ▾) of live stats for the current view · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · the dropdown is <b>sticky</b> (stays open as you work; Esc or re-click to close) · pick <b>None</b>, <b>General</b>, <b>Irradiance (W/m²)</b>, or <b>Insolation (kWh/m²)</b> · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu (the two solar diagrams are skipped outside the elevation views) · the selection is <b>shared across views, but only for stats that read on both sides</b> — <b>General</b> carries between the <b>Building Perimeter</b> and the elevation views, while Irradiance / Insolation are wall reads, so the <b>Building Perimeter shows None</b> for them (your pick is remembered and restored on return) · in the unravel view the readout anchors under the <b>left-most</b> elevation, re-anchoring to the <b>selected wall border</b> once you click one · <i>what each mode shows and how it's computed is in the "?" menu's <b>Statistics Info</b></i></li>
       <li><b>Render</b> · <b>Constraint</b> (top row, just left of the Projects minimap, in line with Undo/Redo) toggle blue when selected / white when deselected like the other tool buttons · enabled only once you leave the <b>Building Perimeter</b> tab (in the elevation/unravel views)</li>
       <li><b>Export</b> (nav header, between Smart Search and Settings) arms the <b>wall-selection marquee</b> in the elevation/unravel views (blue while armed; disabled in the Building Perimeter tab) · <b>click-drag</b> a box over the panels to select every wall it touches (selected walls highlight <b>green</b>) · <b>release</b> opens the export dialog · <b>Esc</b> cancels</li>
       <li><b>Export dialog</b> shows a 3D preview of <b>only the selected walls</b> (<b>drag</b> to orbit · drag the title bar to move) · <b>Revit / AutoCAD / Rhino</b> buttons download a <b>DXF</b> that preserves real dimensions in <b>feet</b> · click outside to flash · <b>Esc</b> / <b>×</b> to close</li>
@@ -5553,7 +5654,7 @@ function ControlsList() {
       <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · with the tool armed, <b>clicking a different wall border</b> reframes to it with <b>Centerlines still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · <b>clicking the empty white canvas</b> (off any panel) deselects the tool · the <b>eye icon</b> on the button's right edge shows / hides all centerlines on the canvas without deleting them · Esc or re-click the button to finish</li>
       <li><b>Erase</b> (bottom-right cluster, just left of the <b>?</b> help button) arms the delete tool and works in BOTH views · <b>Building Perimeter view:</b> hover a perimeter <b>vertex</b> (it turns <b>red</b>) and <b>click</b> to delete it, or <b>click-drag</b> across several vertices to remove them all in one stroke (committed as one undo step; dropping below 3 points reopens the shape) · hover a perimeter <b>edge</b> away from its corners (closed shape only) to highlight that segment <b>red</b> and <b>click</b> to remove it — <b>reopening the loop there while keeping both vertices</b> — or <b>click-drag</b> along the boundary to erase several segments at once · any vertex left <b>alone</b> by losing both its walls (e.g. between two erased edges) is <b>auto-deleted</b> too (it pre-highlights red) ·<b>Unravel view:</b> <b>hover</b> near a panel's centerline <em>or</em> a floor plate to highlight it, <b>click</b> deletes it, and <b>click-drag</b> across multiple lines erases them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · erasing a panel's centerline also <b>clears that panel's framing</b> on that axis (the same way adding a centerline does — re-apply framing afterwards), so no frame bars linger along the border without their centerlines · the default <b>0′ ground floor line</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor Lines</li>
       <li><b>Dim</b> (bottom-right cluster, right of Erase) — clicking the word does nothing yet; its <b>eye icon</b> is the single source of truth for the on-canvas <b>dimensions</b> (the panel width / per-column-row / cell labels and the height input fields across the <b>Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs) · click the eye to show / hide them all (visible by default) · disabled in the <b>Building Perimeter</b> tab · <b>no view (Clean / Shadows) auto-hides dimensions</b> — only the Dim eye does</li>
-      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu ·<b>Technical</b> is the default drafting look (centerlines, framing, and dimensions) · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) and labels each cell with its <b>shape number</b> at its centre (same shape ⇒ same number, like a paint-by-number key) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a vivid cold→hot thermal gradient — <b>N = blue</b>, <b>E = cyan</b>, <b>S = yellow</b>, <b>W = red</b>, with NE/SE/SW/NW on the blends between (sweeping through green and orange) — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map · <b>Clean</b> renders a presentation view — the panels fill <b>white</b> behind the framing · <b>no view ever auto-hides floor lines, centerlines, framing, or dimensions</b> — those four are shown/hidden ONLY by their per-button toggles (the eye icons and the <b>Dim</b> button) · <b>Shadows</b> is a 2.5D presentation built on Clean — every framing bar (Stick mullions + Unitized cell framing) reads as raised above the glass and casts a crisp, hard-edged <b>drop shadow</b> onto the glass beside it (falling into cells and across into neighbours, but never on the frame infill); the shadow length scales with zoom · the elevation/panel/assembly geometry is drawn <b>monochrome</b> (blue/teal tints dropped for neutral greys), while the red + blue hover highlights stay coloured</li>
+      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu · modes are <b>Technical</b>, <b>Material ID</b>, <b>Orientation Heatmap</b>, <b>Clean</b>, and <b>Shadows</b> · <b>no view ever auto-hides floor lines, centerlines, framing, or dimensions</b> — those four are shown/hidden ONLY by their per-button toggles (the eye icons and the <b>Dim</b> button) · <i>what each mode shows and how it's computed is in the "?" menu's <b>View Modes Info</b></i></li>
       <li><b>Hover an edge</b> (edit mode) highlights that edge's line on the active mini-window thumbnail · in unravel, hovering a panel lights its wall instead</li>
       <li><b>Projects panel:</b> click load (fits the shape to the view) · drag preview to rotate · double-click preview for top-down plan view · drag title to move · ☀ toggle a larger <b>Solar Study</b> popup · ✎ rename · <b>⧉ duplicate</b> the whole project (perimeter, elevations, framing — everything) into a new <i>Option</i> · <b>× delete</b> — <b>undoable</b> with Ctrl+Z (Ctrl+Y redoes) · <b>＋ footer</b> (Building Perimeter tab only) saves the current sketch as a new project</li>
       <li><b>Solar Study</b> (☀ popup) draws a 3D <b>sun-path dome</b> around the massing from real solar geometry · drag to rotate · double-click for an aerial top-down view (synced with the thumbnail) · <b>Orientation dial</b> — drag the needle (or type degrees) to set the drawing's North relative to the cardinal directions · <b>Date</b> and <b>Solar time</b> sliders move the sun along its path (with a live altitude / azimuth readout) · <b>Latitude</b> field (temporary Omaha, NE default until the address is geocoded) · Location field inherits the sketch's address · settings are saved with the sketch</li>
@@ -5563,6 +5664,39 @@ function ControlsList() {
       <li><b>Settings</b> (⚙ at the top-right of the nav header) opens a draggable Settings popup (drag its title bar to move · Esc or × to close) with a category rail on the left (<b>Units</b>) · under Units, a <b>Feet ′ / Metric m</b> length-unit switch · click <b>Save</b> (bottom-right) to apply the unit to every dimension across the app (drawings, statistics, minimap, elevations, walls, cells) — the geometry is unchanged, only the units shown</li>
       <li><b>Collapse panel</b> (◂ / ▸ at the bottom-left corner) hides or shows the left tool panel to give the canvas more room</li>
       <li><b>Edit a loaded entry</b> footprint and elevation-view edits auto-save to that entry (no manual save) · the mini-window's <b>＋ footer</b> always creates a new entry instead</li>
+
+    </ul>
+  );
+}
+
+/**
+ * VIEW MODES INFO panel ("?" menu → View Modes Info). One entry per View-button display
+ * mode: a plain-language sentence on WHAT it shows, then an italic "How:" clause on how
+ * it's computed. Kept in sync with the View dropdown (CELL_VIEW_LABELS) + the renderer.
+ */
+function ViewModesInfo() {
+  return (
+    <ul className="help">
+      <li><b>Technical</b> the default drafting view — centerlines, framing, and dimensions on a plain background, no cell tinting. <span className="help__how">How: draws the authored geometry as-is; what's visible is governed only by the Floor Lines / Centerlines / Framing eye toggles and the Dim button.</span></li>
+      <li><b>Material ID</b> tints every grid cell by its geometric <b>shape</b>, so identical cells across the whole project share one colour and number. <span className="help__how">How: each cell's width × height is rounded to ~0.001′ and bucketed into a shape group; the group index maps to a hue via the golden angle (137.5°), and identical cells fan out in saturation. The Statistics <b>Unique cells</b> count is the number of distinct groups.</span></li>
+      <li><b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces and prints that facade's <b>live direct-sun hit %</b> beneath the cardinal. <span className="help__how">How: the facade's outward normal (from the perimeter's winding) is rotated by the Solar Study's North into a true bearing, then mapped onto a cold→hot ramp (N blue · E cyan · S yellow · W red). The % is the cosine of the sun's angle of incidence on the wall — cos(altitude)·cos(sun-azimuth − wall-bearing) at the Solar Study's current day + hour — shown as 100% (sun square-on) down to 0% (grazing or sun behind the wall), or "—" when the sun is below the horizon.</span></li>
+      <li><b>Clean</b> a presentation view — the glass panels fill <b>white</b> behind the framing. <span className="help__how">How: the same geometry as Technical with cell infill forced white; the per-button visibility toggles still apply.</span></li>
+      <li><b>Shadows</b> a 2.5D presentation — every framing bar reads as raised and casts a hard <b>drop shadow</b> onto the adjacent glass. <span className="help__how">How: built on Clean — each frame bar projects a shadow quad onto neighbouring glass only (never onto frame infill), its length scaling with zoom; the geometry is drawn monochrome while hover highlights stay coloured.</span></li>
+    </ul>
+  );
+}
+
+/**
+ * STATISTICS INFO panel ("?" menu → Statistics Info). One entry per Statistics-dropdown
+ * mode: a plain-language sentence on WHAT it shows, then an italic "How:" clause on how
+ * it's computed. Kept in sync with the Statistics dropdown + core/radiation.ts.
+ */
+function StatisticsInfo() {
+  return (
+    <ul className="help">
+      <li><b>General</b> live geometric totals for the current view. <span className="help__how">How: read straight off the drawn geometry — the <b>Building Perimeter</b> shows wall count, perimeter length, footprint area (shoelace formula), and bounding extents; the <b>unravel</b> views show segment count, unwrapped length, total facade area (Σ length × height), and the unique-cell count.</span></li>
+      <li><b>Irradiance (W/m²)</b> a Ladybug-style <b>month × hour</b> heatmap of clear-sky solar power landing on the selected wall. <span className="help__how">How: for each month's representative day and each hour, the sun's altitude/azimuth (spherical astronomy from the Solar Study's latitude + North) drive a Hottel clear-sky beam transmittance; wall irradiance = direct-normal·cos(incidence) (beam, only when the sun faces the wall) + isotropic sky-diffuse + ground-reflected, coloured cold→hot. Clear-sky only (no weather file yet).</span></li>
+      <li><b>Insolation (kWh/m²)</b> the energy companion — a <b>monthly bar chart</b> of the solar energy that same wall receives. <span className="help__how">How: integrates the Irradiance over each representative day and scales by the days in the month → kWh/m² per month; summed over the year it gives the annual <b>kWh/m²·yr</b> total shown on both diagrams.</span></li>
     </ul>
   );
 }

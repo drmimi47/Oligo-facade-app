@@ -165,8 +165,11 @@ export interface UnravelDraw {
    * grid CELL of this panel. `t` is a heat scalar in [0,1] (0 = cool/blue/north-
    * facing, 1 = warm/red/west-facing) the renderer maps through a CSS-tuned hue ramp
    * to fill the cell; `label` is the cell's 8-point cardinal direction (N, NE, …),
-   * drawn centred in the cell. The facing comes from the panel's exterior face normal
-   * rotated by the Solar Study's north offset (real per-face data). Undefined off-view.
+   * drawn centred in the cell. `sun` is the LIVE direct-sun incidence readout for the
+   * facade (e.g. "63%", "0%" when self-shaded, "—" at night) — drawn as a smaller
+   * second line under the cardinal when the cell is tall enough. The facing comes from
+   * the panel's exterior face normal rotated by the Solar Study's north offset (real
+   * per-face data); `sun` additionally uses the studied day + hour. Undefined off-view.
    */
   cellOrient?: Array<{
     x0: number;
@@ -175,6 +178,7 @@ export interface UnravelDraw {
     y1: number;
     t: number;
     label: string;
+    sun?: string;
   }>;
 }
 
@@ -1590,6 +1594,9 @@ function drawUnravel(
     // Skipped in overview boundaries-only mode and on cells too small to fit a label
     // (avoids piling overlapping text on a finely-subdivided panel).
     if (!boundariesOnly && cellOrient && cellOrient.length > 0) {
+      // Smaller font for the secondary direct-sun (%) line, so it reads as subordinate
+      // to the cardinal. Centralised in CSS like the primary label token.
+      const sunFont = cssVar(canvas, "--orient-sun-font", "10px ui-monospace, monospace");
       for (const co of cellOrient) {
         const c0 = toScreen(vp, { x: co.x0, y: co.y0 });
         const c1 = toScreen(vp, { x: co.x1, y: co.y1 });
@@ -1598,7 +1605,16 @@ function drawUnravel(
         if (cw < 26 || ch < 18) continue;
         const cx = (c0.x + c1.x) / 2;
         const cy = (c0.y + c1.y) / 2;
-        drawInvertedCellLabel(ctx, canvas, cx, cy, co.label);
+        // Two-line stack (cardinal over direct-sun %) only when the cell is tall enough
+        // to fit both without overlap; otherwise fall back to the cardinal alone so a
+        // finely-subdivided panel never piles text. The 9px half-offset matches the
+        // 12px/10px label line heights.
+        if (co.sun !== undefined && ch >= 34) {
+          drawInvertedCellLabel(ctx, canvas, cx, cy - 9, co.label);
+          drawInvertedCellLabel(ctx, canvas, cx, cy + 9, co.sun, sunFont);
+        } else {
+          drawInvertedCellLabel(ctx, canvas, cx, cy, co.label);
+        }
       }
     }
 
@@ -1819,11 +1835,12 @@ function drawInvertedCellLabel(
   cx: number,
   cy: number,
   text: string,
+  font?: string,
 ): void {
   ctx.save();
   ctx.globalCompositeOperation = "difference";
   ctx.fillStyle = "#ffffff"; // difference vs white ⇒ inverted colour of the background pixel
-  ctx.font = cssVar(canvas, "--label-font", "12px ui-monospace, monospace");
+  ctx.font = font ?? cssVar(canvas, "--label-font", "12px ui-monospace, monospace");
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, cx, cy);
