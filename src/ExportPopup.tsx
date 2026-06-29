@@ -22,7 +22,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Perimeter } from "./core/geometry";
 import { render3d, DEFAULT_CAMERA, type Camera } from "./core/extrude3d";
-import { selectionToDxf } from "./core/exporters";
+import { selectionToDxf, selection2DToDxf } from "./core/exporters";
+import type { FacadeRecords } from "./core/facadeLines";
 
 /** Drag sensitivity for the orbit gesture (radians per pixel) — matches MiniWindow. */
 const ROTATE_RAD_PER_PX = 0.01;
@@ -31,25 +32,24 @@ const ELEVATION_LIMIT = 1.45; // ~83°
 /** Margin (px) left around the massing inside the preview canvas. */
 const PREVIEW_MARGIN_PX = 16;
 
-/** One export target: button label + the file name its download produces. */
+/** One export target: button label + how that app takes the DXF. */
 interface ExportTarget {
-  /** App this DXF is aimed at (used in the button label + the file name). */
+  /** App this DXF is aimed at (used in the button label). */
   app: string;
   /** Short note shown under the label clarifying the format. */
   note: string;
-  /** Download file name. */
-  file: string;
 }
 
 /**
- * The three export targets. All emit a unit-preserving DXF (see exporters.ts); the
- * label names the destination app so the intent is explicit. Native .3dm / IFC /
- * DWG can be layered behind these same buttons later without changing the UI.
+ * The three export targets. Each downloads the SAME pair of unit-preserving DXFs (3D +
+ * 2D — see exporters.ts); the label names the destination app so the intent is explicit.
+ * Native .3dm / IFC / DWG can be layered behind these same buttons later without
+ * changing the UI.
  */
 const TARGETS: ExportTarget[] = [
-  { app: "Revit", note: "DXF · Insert ▸ Link/Import CAD", file: "facade-selection-revit.dxf" },
-  { app: "AutoCAD", note: "DXF · native import", file: "facade-selection-autocad.dxf" },
-  { app: "Rhino", note: "DXF · File ▸ Import", file: "facade-selection-rhino.dxf" },
+  { app: "Revit", note: "DXF · Insert ▸ Link/Import CAD" },
+  { app: "AutoCAD", note: "DXF · native import" },
+  { app: "Rhino", note: "DXF · File ▸ Import" },
 ];
 
 interface ExportPopupProps {
@@ -61,6 +61,10 @@ interface ExportPopupProps {
   heights: Record<number, number>;
   /** Default wall height (model units / feet) for any edge without an override. */
   defaultHeight: number;
+  /** Per-wall centerline + framing records, exported as sub-layers under each wall. */
+  facadeRecords: FacadeRecords;
+  /** Inter-panel gap (model feet) of the unravel strip — positions the 2D export. */
+  unravelGap: number;
   /** Stage element to portal into and to bound the drag within (the canvas wrap). */
   stageRef: React.RefObject<HTMLElement>;
   /** Close the popup. */
@@ -72,6 +76,8 @@ export default function ExportPopup({
   edges,
   heights,
   defaultHeight,
+  facadeRecords,
+  unravelGap,
   stageRef,
   onClose,
 }: ExportPopupProps) {
@@ -185,10 +191,9 @@ export default function ExportPopup({
     });
   }, [perimeter, camera, heights, defaultHeight, edges]);
 
-  /** Build the selection's DXF (feet, units-preserving) and download it. */
-  const downloadDxf = (file: string) => {
-    const dxf = selectionToDxf(perimeter, edges, heightOf);
-    const blob = new Blob([dxf], { type: "application/dxf" });
+  /** Trigger a browser download of `content` as `file` (Blob + object URL + <a>). */
+  const saveFile = (file: string, content: string) => {
+    const blob = new Blob([content], { type: "application/dxf" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -197,6 +202,16 @@ export default function ExportPopup({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // Every export target downloads BOTH a 3D and a 2D DXF of the selection (one click ⇒
+  // two files): the extruded 3D massing, and the flat unrolled-elevation layout. Both
+  // use the same layer scheme / units; all three app buttons emit the same pair (one
+  // DXF serves Revit / AutoCAD / Rhino — see core/exporters.ts). The fixed names make
+  // the two views easy to tell apart in the downloads folder.
+  const downloadSelection = () => {
+    saveFile("3D-facade-selection.dxf", selectionToDxf(perimeter, edges, heightOf, facadeRecords));
+    saveFile("2D-facade-selection.dxf", selection2DToDxf(perimeter, edges, heightOf, facadeRecords, unravelGap));
   };
 
   // The popup lives inside the stage so it overlays the canvas; bail if not mounted.
@@ -229,9 +244,7 @@ export default function ExportPopup({
           onPointerMove={onTitlePointerMove}
           onPointerUp={onTitlePointerUp}
         >
-          <span className="export-popup__title">
-            Export · {count} wall{count === 1 ? "" : "s"} selected
-          </span>
+          <span className="export-popup__title">Export</span>
           <button
             className="export-popup__close"
             onClick={onClose}
@@ -253,16 +266,15 @@ export default function ExportPopup({
             title="Drag to orbit the 3D preview of the selected walls"
           />
           <div className="export-popup__hint">
-            3D preview of the selected walls (drag to orbit). Files preserve real
-            dimensions in feet.
+            {count} wall border{count === 1 ? "" : "s"} selected
           </div>
           <div className="export-popup__targets">
             {TARGETS.map((t) => (
               <button
                 key={t.app}
                 className="export-popup__target"
-                onClick={() => downloadDxf(t.file)}
-                title={`Download a unit-preserving DXF for ${t.app}`}
+                onClick={downloadSelection}
+                title={`Download unit-preserving 3D + 2D DXF files for ${t.app}`}
               >
                 <span className="export-popup__target-app">{t.app}</span>
                 <span className="export-popup__target-note">{t.note}</span>

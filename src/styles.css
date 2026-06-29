@@ -109,7 +109,11 @@
   --export-marquee-dash: 5;                       /* Marquee dash length (px) */
   --export-popup-width: 320px;                    /* Export dialog width */
   --export-preview-height: 220px;                 /* Export dialog 3D preview height */
-  --export-preview-bg: var(--mini-canvas-bg, #0c1218); /* 3D preview canvas background */
+  /* 3D preview canvas background — MUST match the colour render3d actually paints the
+     canvas with (--mini-thumb-bg) so no sub-pixel DPR sliver of a different colour
+     shows at the canvas edge inside its border (that mismatch looked like a misaligned
+     border). Theme-aware via --mini-thumb-bg, so it stays correct in light + dark. */
+  --export-preview-bg: var(--mini-thumb-bg); /* 3D preview canvas background */
   /* SHADOWS view ("View" button): a 2.5D presentation that builds on CLEAN (white glass) and
      casts a crisp, hard-edged drop shadow from every framing bar onto the glass beside it. */
   --frame-shadow-color: rgba(17,22,28,0.30); /* SHADOWS view: hard drop-shadow fill (no blur) cast by each raised framing bar onto the glass — never on the frame infill */
@@ -411,6 +415,38 @@
   /* Subtle text shadow so the (un-surfaced) readouts stay readable over busy canvas
      content without an opaque background. */
   --stats-dropdown-text-shadow: 0 1px 2px var(--color-app-bg);
+
+  /* === SOLAR RADIATION DIAGRAMS (irradiance heatmap + insolation chart) ===
+     Two paired Statistics options drawn on the selected wall border:
+       · "Irradiance (W/m²)"  — a Ladybug-style month×hour heatmap (RadiationDiagram.tsx):
+                                horizontal = months, vertical = hour, cell colour =
+                                clear-sky solar irradiance (instantaneous power) on the wall.
+       · "Insolation (kWh/m²)" — the energy companion: a monthly bar chart of the energy
+                                the wall receives each month (InsolationChart.tsx).
+     Both restyle entirely from the tokens below + the shared label classes. Axis, legend,
+     and footer TEXT use the SAME font + colour as the General readout (var(--label-font)
+     mono at var(--color-text-dim)), so every statistics overlay reads identically; only
+     the geometry (cell/bar/legend sizing) is tokenised here. The colour ramp is shared,
+     so a warm heatmap cell and a tall warm bar both read as "high radiation". */
+  --radiation-cell-w: 42.1875px;          /* Width of one month column's cell (75px base × 0.75² — diagram scaled to ~56%; text/font size unchanged) */
+  --radiation-cell-h: 10.125px;           /* Height of one hour row's cell (18px base × 0.75²; paired with cell-w to keep the ~2:1 grid proportion) */
+  --radiation-cell-border: #fff;          /* Thin border drawn around every heatmap cell */
+  --radiation-cell-border-w: 0.5px;       /* Cell border thickness */
+  --radiation-grid-color: rgba(0, 0, 0, 0.25); /* Hairline around the legend bar */
+  /* Cold→hot colour ramp (low → high radiation), sampled across 5 stops:
+     deep blue → blue → teal → yellow → red. Mirrors the Orientation Heatmap's vivid
+     thermal scale so the two solar visualisations read in the same colour language. */
+  --radiation-stop-0: #1b2a6b;            /* Lowest radiation — deep blue */
+  --radiation-stop-1: #1f7ae0;            /* Low — blue */
+  --radiation-stop-2: #21c3a6;            /* Mid — teal */
+  --radiation-stop-3: #ffd60a;            /* High — yellow */
+  --radiation-stop-4: #ff2d1c;            /* Highest radiation — red */
+  /* --- Monthly insolation chart (InsolationChart.tsx) ---
+     Bars share the month-column width (--radiation-cell-w) so they line up with the
+     heatmap, and the thermal ramp above so colour reads consistently. Only the plot
+     height and bar gap are unique to the chart. */
+  --insolation-plot-h: 160px;             /* Height of the bar-chart plot area (axis 0 → max) */
+  --insolation-bar-gap: 6px;              /* Horizontal inset per column → bar width = cell-w − gap */
 }
 
 /* ==========================================================================
@@ -930,10 +966,17 @@ input[type="checkbox"] {
 .readout {
   display: flex;
   justify-content: space-between;
+  /* MINIMUM separation between key and value. space-between fills any extra width (when
+     the box is wider than the row), but in a content-sized box — .stats-dropdown uses
+     width: max-content — the widest row has no slack, so this gap keeps key and value from
+     touching there. */
+  gap: var(--space-4);
   font-family: var(--font-mono);
 }
 .readout__key { color: var(--color-text-dim); }
-.readout__val { color: var(--color-text); }
+/* Never break the value across lines (e.g. an Extents "# ft × # ft" pair) — the box grows
+   to fit instead (see .stats-dropdown width: max-content). */
+.readout__val { color: var(--color-text); white-space: nowrap; }
 
 /* === HELP LIST === */
 .help {
@@ -996,20 +1039,9 @@ input[type="checkbox"] {
   gap: var(--space-1);
 }
 
-/* === TOP-RIGHT TOOL CLUSTER (Render · Constraint) ===
-   Mirrors .history-controls but anchored to the RIGHT, parked just LEFT of the
-   Projects minimap (which sits at right:--mini-offset and is --mini-width wide) while
-   staying on the SAME horizontal line as the top-left undo/redo cluster (same top
-   inset). The buttons reuse the .history-btn look so the whole top row reads as one
-   family. (The minimap is draggable, so this anchors to its DEFAULT spot.) */
-.topright-tools {
-  position: absolute;
-  top: var(--space-3);
-  right: calc(var(--mini-offset) + var(--mini-width) + var(--space-2));
-  z-index: 50;
-  display: flex;
-  gap: var(--space-1);
-}
+/* Render · Constraint now live INLINE at the right end of .history-controls (just
+   after the View menu), reusing the .history-btn look, so the whole top-left
+   technical-view row reads as one family — no separate top-right cluster needed. */
 .history-btn {
   height: var(--control-height);
   padding: 0 var(--space-2);          /* compact — tighter than the default .btn */
@@ -1060,7 +1092,11 @@ input[type="checkbox"] {
   top: calc(100% + var(--stats-dropdown-gap));   /* drop DOWN, just below the button */
   left: 0;
   z-index: 51;                                   /* above the canvas/overlays */
-  width: var(--stats-dropdown-width);
+  /* GROW to fit the content: --stats-dropdown-width is a MINIMUM, not a fixed cap, so a
+     long value (e.g. "Extents 123.45 ft × 678.90 ft") widens the box rather than wrapping
+     onto a second line. Paired with .readout__val { white-space: nowrap } below. */
+  min-width: var(--stats-dropdown-width);
+  width: max-content;
   display: flex;
   flex-direction: column;
   gap: var(--stats-dropdown-row-gap);
@@ -1070,6 +1106,13 @@ input[type="checkbox"] {
   /* Let canvas pan/zoom pass THROUGH the dropdown's empty areas; the readout text is
      informational only and needs no interaction. */
   pointer-events: none;
+}
+/* "Behind" variant: drops BELOW the canvas floating UI (the bottom-left minimap and
+   the tool-button cluster) so the stats text never paints over them — it sits just
+   above the canvas/crosshair instead. BOTH the Building Perimeter and the unravel
+   overlays use this, so the General readout always renders behind the minimap preview. */
+.stats-dropdown--behind {
+  z-index: 2;                                    /* above canvas (0) + crosshair (1), below minimap (10) + buttons (50) */
 }
 .stats-dropdown .readout,
 .stats-dropdown .stats-dropdown__title {
@@ -1082,6 +1125,65 @@ input[type="checkbox"] {
   font-weight: 600;
   color: var(--color-text-dim);
   margin-bottom: var(--space-1);
+}
+
+/* === SOLAR RADIATION DIAGRAMS (irradiance heatmap + insolation chart) ===
+   The "Irradiance (W/m²)" heatmap (RadiationDiagram.tsx) and its energy companion the
+   "Insolation (kWh/m²)" chart (InsolationChart.tsx). Both live inside a .stats-dropdown
+   wrapper, so they inherit the transparent, viewport-light surface and the "behind the
+   minimap" stacking. These rules cover only the diagrams' own parts; the colour ramp +
+   cell/bar sizing are the CSS tokens in the :root block above. The two share the
+   __axis-label / __axis-unit / __total text classes so their typography is identical. */
+/* Plain block flow so the title's own margin-bottom (inherited from
+   .stats-dropdown__title) governs the title→diagram gap exactly like the General
+   overlay; the diagram→footer gap is a small explicit margin on the total line. */
+.radiation-diagram__svg {
+  display: block;
+}
+/* Thin border around every heatmap cell so the month×hour grid reads as discrete
+   cells rather than a continuous wash. */
+.radiation-diagram__cell {
+  stroke: var(--radiation-cell-border);
+  stroke-width: var(--radiation-cell-border-w);
+}
+/* Axis / legend labels are SVG <text>. They take the General readout's exact font
+   (mono, --label-font size) and dim colour via `fill`, with the same legibility
+   shadow, so every number in the diagram matches the General statistics text. */
+.radiation-diagram__axis-label,
+.radiation-diagram__axis-unit {
+  font: var(--label-font);
+  font-family: var(--font-mono);
+  fill: var(--color-text-dim);
+  text-shadow: var(--stats-dropdown-text-shadow);
+}
+.radiation-diagram__legend {
+  stroke: var(--radiation-grid-color);
+}
+.radiation-diagram__total {
+  margin-top: var(--space-1);
+  font: var(--label-font);
+  font-family: var(--font-mono);
+  color: var(--color-text-dim);
+  text-shadow: var(--stats-dropdown-text-shadow);
+}
+
+/* --- Monthly insolation chart (InsolationChart.tsx) ---
+   Geometry-only rules; the chart reuses the radiation-diagram label/unit/total text
+   classes above for identical typography. */
+.insolation-chart__svg {
+  display: block;
+}
+/* Horizontal gridlines behind the bars (same hairline as the legend outline) so bar
+   heights can be read against the kWh/m² axis. */
+.insolation-chart__grid {
+  stroke: var(--radiation-grid-color);
+  stroke-width: 1px;
+}
+/* Bars are filled per-month on the shared thermal ramp (set inline); the thin white
+   edge matches the heatmap cell border so the two diagrams share a visual language. */
+.insolation-chart__bar {
+  stroke: var(--radiation-cell-border);
+  stroke-width: var(--radiation-cell-border-w);
 }
 
 /* === BOTTOM-LEFT TOOL CLUSTER ===
@@ -1272,6 +1374,13 @@ input[type="checkbox"] {
 }
 .cw-menu__btn:hover,
 .view-menu__btn:hover { background: var(--control-bg-hover); }
+/* Gated menu items (e.g. the solar diagrams outside the elevation views) read as
+   unavailable: dimmed and non-interactive, with no hover affordance. */
+.view-menu__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.view-menu__btn:disabled:hover { background: transparent; }
 .cw-menu__btn.is-active,
 .view-menu__btn.is-active {
   background: var(--control-bg-active);

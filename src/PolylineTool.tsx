@@ -21,6 +21,9 @@ import {
   hitVertex,
   hitSegment,
   hitHandle,
+  flattenPerimeter,
+  perimeterLength,
+  enclosedArea,
   type Perimeter,
   type Point,
 } from "./core/geometry";
@@ -69,6 +72,9 @@ import {
   type CellInsets,
 } from "./core/savedPerimeters";
 import { cloneSolarSettings, defaultSolarSettings, type SolarSettings } from "./core/solar";
+import { buildRadiationMatrix } from "./core/radiation";
+import RadiationDiagram from "./RadiationDiagram";
+import InsolationChart from "./InsolationChart";
 import MiniWindow from "./MiniWindow";
 import ExportPopup from "./ExportPopup";
 import OverviewMap from "./OverviewMap";
@@ -599,9 +605,12 @@ export default function PolylineTool() {
 
   // --- STATISTICS DROPDOWN ---
   // The "Statistics" button (top of canvas, next to Redo) toggles a dropdown that
-  // "none" = hidden; "general" = show the general stats overlay on the canvas.
-  // statsMenuOpen controls the selector dropdown (None / General options).
-  const [statsMode, setStatsMode] = useState<"none" | "general">("none");
+  // "none" = hidden; "general" = the general stats overlay; "irradiance" = the
+  // Irradiance (W/m²) diagram (a Ladybug-style month×hour solar heatmap on the selected
+  // wall border); "insolation" = its energy companion, the monthly Insolation (kWh/m²)
+  // bar chart for the same wall. statsMenuOpen controls the selector dropdown (None /
+  // General / Irradiance / Insolation options).
+  const [statsMode, setStatsMode] = useState<"none" | "general" | "irradiance" | "insolation">("none");
   const [statsMenuOpen, setStatsMenuOpen] = useState(false);
 
   // --- TRANSIENT INTERACTION STATE ---
@@ -1548,7 +1557,13 @@ export default function PolylineTool() {
       if (focusedPanel !== null) {
         // Apply to the focused panel only.
         const edge = focusedPanel;
-        if (panelCwType[edge] === t) return; // already this system — nothing to change
+        // Auto-arm the Centerlines tool: choosing a CW system makes placing centerlines
+        // the natural next step, so the button turns blue/armed immediately and the user
+        // doesn't have to click it. (The CW menu already disarmed the other cluster tools,
+        // so no mutual-exclusion conflict; restore centerline visibility like onSubtractive.)
+        setCenterlinesVisible(true);
+        setSubtractiveOn(true);
+        if (panelCwType[edge] === t) return; // already this system — nothing else to change
         recordHistory();
         setPanelCwType((prev) => ({ ...prev, [edge]: t }));
         // Drop the now-incompatible framing for this panel (centerlines are untouched).
@@ -2295,6 +2310,13 @@ export default function PolylineTool() {
               lastDrillRef.current = now;
               zoomToPanel(clickedEdge);
             }
+          } else if (clickedEdge < 0) {
+            // A press on the empty WHITE canvas (no panel under the cursor) DISARMS the
+            // Centerlines tool — its dedicated deselect gesture. Presses ON a panel keep
+            // every behaviour above (commit split / reframe); only blank canvas deselects.
+            setSubtractiveOn(false);
+            setDivideHover(null);
+            setDivideDraft(null);
           }
           return; // armed tool consumes the press regardless of where it landed
         }
@@ -2334,6 +2356,15 @@ export default function PolylineTool() {
                 lastDrillRef.current = now;
                 zoomToPanel(clickedEdge);
               }
+            } else if (clickedEdge < 0) {
+              // A press on the empty WHITE canvas (no panel) DISARMS the Framing tool —
+              // its dedicated deselect gesture. Presses on a panel keep the behaviours
+              // above; only blank canvas deselects.
+              setMullionsOn(false);
+              setMullionHover(null);
+              setMullionDraft(null);
+              setCellEdgeHover(null);
+              setCellFrameDraft(null);
             }
           }
           return; // armed tool consumes the press regardless of where it landed
@@ -2375,6 +2406,15 @@ export default function PolylineTool() {
                 lastDrillRef.current = now;
                 zoomToPanel(clickedEdge);
               }
+            } else if (clickedEdge < 0) {
+              // A press on the empty WHITE canvas (no panel) DISARMS the Framing tool —
+              // its dedicated deselect gesture. Presses on a panel keep the behaviours
+              // above; only blank canvas deselects.
+              setMullionsOn(false);
+              setMullionHover(null);
+              setMullionDraft(null);
+              setCellEdgeHover(null);
+              setCellFrameDraft(null);
             }
           }
           return; // armed tool consumes the press regardless of where it landed
@@ -4335,6 +4375,15 @@ export default function PolylineTool() {
       setExportPopup(null);
     }
   }, [unravelOn]);
+  // Leaving the Building Perimeter tab (entering an unravel/elevation view) clears the
+  // perimeter Draw/Edit/Erase selection so none stays highlighted on another tab.
+  // Draw/Edit de-highlight on their own (their active state is gated to phase ===
+  // "perimeter"); Erase is not phase-gated, so disarm it explicitly here. Keyed ONLY on
+  // the unravelOn transition (not eraserOn) so re-arming Erase inside the unravel view —
+  // where it deletes centerlines / floor lines — is not immediately undone.
+  useEffect(() => {
+    if (unravelOn) setEraserOn(false);
+  }, [unravelOn]);
 
   // Is the current sketch SAVED (a saved project is loaded/active)? A brand-new sketch
   // has activeSavedId == null until "＋ Save current sketch" is used (see the auto-save
@@ -4364,7 +4413,10 @@ export default function PolylineTool() {
     ? "Click to place vertices · click-drag to convert to arc · hold Shift to lock 15° · double-click or Enter to close"
     : phase === "perimeter" && mode === "edit"
     ? "Drag a vertex to move · drag a knob to curve · double-click a vertex for a corner"
-    : unravelOn && Object.keys(panelCwType).length === 0
+    : // Show whenever the FOCUSED wall border still has no CW Type (every time the user
+      // clicks into a type-less border, not just the very first one), and as the initial
+      // onboarding cue in the elevations overview while NO panel has a type yet.
+      unravelOn && cwType === null && (focusedPanel !== null || Object.keys(panelCwType).length === 0)
     ? "Assign a CW Type to start"
     : "";
 
@@ -4610,6 +4662,10 @@ export default function PolylineTool() {
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
+            // Suppress the browser's native right-click menu ("Save image as…",
+            // "Copy image", "Inspect") over the canvas: right-click-drag is a PAN
+            // gesture here, so the context menu would interrupt navigation.
+            onContextMenu={(e) => e.preventDefault()}
             onPointerLeave={() => {
               setCursorModel(null);
               setHoveredUnravelEdge(-1);
@@ -4697,7 +4753,29 @@ export default function PolylineTool() {
             {/* STATISTICS selector — picks which stats overlay to show on the canvas.
                 "None" hides the overlay; "General" shows elevation stats anchored
                 below the left-most elevation panel. */}
-            <div className="stats-anchor">
+            <div
+              className="stats-anchor"
+              // Scroll-wheel cycles the statistics modes WITHOUT opening the menu —
+              // mirrors the View button. Only the currently-AVAILABLE modes are in the
+              // cycle: the solar diagrams ("Irradiance" + "Insolation") need a wall
+              // orientation, so they're skipped outside the unravel/elevation views.
+              // No-ops when the selector itself is disabled (no closed perimeter and not
+              // in an elevation view).
+              onWheel={(e) => {
+                if (!unravelOn && !perimeter.closed) return;
+                e.stopPropagation();
+                const modes: typeof statsMode[] = unravelOn
+                  ? ["none", "general", "irradiance", "insolation"]
+                  : ["none", "general"];
+                const idx = modes.indexOf(statsMode);
+                const next =
+                  e.deltaY > 0
+                    ? (idx + 1) % modes.length
+                    : (idx - 1 + modes.length) % modes.length;
+                setStatsMode(modes[next]);
+                setStatsMenuOpen(false);
+              }}
+            >
               <button
                 className="history-btn"
                 onClick={() => {
@@ -4706,12 +4784,15 @@ export default function PolylineTool() {
                   setViewMenuOpen(false);
                   disarmClusterTools();
                 }}
-                disabled={!unravelOn}
+                // Enabled in the unravel/elevation views, OR in the Building Perimeter
+                // tab once a CLOSED perimeter exists (re-locks if the shape is reopened),
+                // so footprint stats are available wherever there's something to measure.
+                disabled={!unravelOn && !perimeter.closed}
                 title="Select the live statistics to display"
                 aria-haspopup="true"
                 aria-expanded={statsMenuOpen}
               >
-                Statistics: {statsMode === "none" ? "None" : "General"} ▾
+                Statistics: {statsMode === "none" ? "None" : statsMode === "general" ? "General" : statsMode === "irradiance" ? "Irradiance (W/m²)" : "Insolation (kWh/m²)"} ▾
               </button>
               {statsMenuOpen && (
                 <div className="view-menu" role="menu">
@@ -4730,6 +4811,30 @@ export default function PolylineTool() {
                     onClick={() => { setStatsMode("general"); setStatsMenuOpen(false); }}
                   >
                     General
+                  </button>
+                  {/* The solar diagrams are ELEVATION/wall-border reads (they need a wall
+                      orientation), so they're only meaningful in the unravel view; disabled
+                      in the Building Perimeter tab. Irradiance = the month×hour W/m² heatmap;
+                      Insolation = its monthly kWh/m² energy companion. */}
+                  <button
+                    className={`view-menu__btn ${statsMode === "irradiance" ? "is-active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={statsMode === "irradiance"}
+                    disabled={!unravelOn}
+                    title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
+                    onClick={() => { setStatsMode("irradiance"); setStatsMenuOpen(false); }}
+                  >
+                    Irradiance (W/m²)
+                  </button>
+                  <button
+                    className={`view-menu__btn ${statsMode === "insolation" ? "is-active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={statsMode === "insolation"}
+                    disabled={!unravelOn}
+                    title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
+                    onClick={() => { setStatsMode("insolation"); setStatsMenuOpen(false); }}
+                  >
+                    Insolation (kWh/m²)
                   </button>
                 </div>
               )}
@@ -4782,13 +4887,11 @@ export default function PolylineTool() {
                 </div>
               )}
             </div>
-          </div>
-          {/* TOP-RIGHT tool cluster — Render · Constraint. Anchored just LEFT of the
-              Projects minimap and in line horizontally with the top-left undo/redo row
-              (same top inset). SCAFFOLDED toggle buttons (no behaviour yet): blue while
-              armed, white otherwise, and only clickable outside the Building Perimeter
-              tab (disabled until the user opens an unravel/elevation view). */}
-          <div className="topright-tools">
+            {/* RENDER · CONSTRAINT — sit at the RIGHT end of the top-left cluster, just
+                after the View ("view technical") menu, so the whole technical-view row
+                reads as one family. SCAFFOLDED toggle buttons (no behaviour yet): blue
+                while armed, white otherwise, and only clickable outside the Building
+                Perimeter tab (disabled until the user opens an unravel/elevation view). */}
             <button
               className={`history-btn ${renderOn ? "is-active" : ""}`}
               onClick={() => setRenderOn((on) => !on)}
@@ -5027,15 +5130,23 @@ export default function PolylineTool() {
               })}
             </div>
           )}
-          {/* STATISTICS OVERLAY — floats below and offset from the left-most elevation
-              panel when statsMode is "general" and the unravel view is active. Tracks
-              the viewport so it pans/zooms with the canvas content. */}
+          {/* STATISTICS OVERLAY — floats below and offset from a wall border's LEFT edge
+              when statsMode is "general" and the unravel view is active. By default
+              (no border selected) it anchors to the LEFT-MOST elevation panel; once a
+              wall border is selected (focusedPanel), it re-anchors to that border's left
+              edge instead, left-aligned with the same spacing. Tracks the viewport so it
+              pans/zooms with the canvas content. */}
           {statsMode === "general" && unravelOn && unravelResult && unravelResult.segments.length > 0 && (() => {
-            const leftSeg = unravelResult.segments[0];
-            const pos = toScreen(viewport, { x: leftSeg.x0, y: 0 });
+            // Anchor segment: the selected wall border if one is focused, else the
+            // left-most panel. A stale focus (border no longer present) falls back too.
+            const anchorSeg =
+              (focusedPanel !== null
+                ? unravelResult.segments.find((s) => s.index === focusedPanel)
+                : undefined) ?? unravelResult.segments[0];
+            const pos = toScreen(viewport, { x: anchorSeg.x0, y: 0 });
             return (
               <div
-                className="stats-dropdown"
+                className="stats-dropdown stats-dropdown--behind"
                 role="region"
                 aria-label="Live statistics"
                 style={{ position: "absolute", left: pos.x - 8, top: pos.y + 16, pointerEvents: "none" }}
@@ -5061,6 +5172,96 @@ export default function PolylineTool() {
                 <div className="readout">
                   <span className="readout__key">Unique cells</span>
                   <span className="readout__val">{cellShapeColors.uniqueCount}</span>
+                </div>
+              </div>
+            );
+          })()}
+          {/* SOLAR RADIATION DIAGRAMS — the Irradiance (W/m²) month×hour heatmap and its
+              energy companion, the Insolation (kWh/m²) monthly bar chart, for ONE wall
+              border. Both anchor exactly like the General overlay: the SELECTED wall
+              border if one is focused, else the LEFT-MOST elevation. The matrix is built
+              from the live Solar Study settings (activeSolar: latitude, north offset) and
+              that wall's TRUE compass orientation (faceBearings) — same source of truth as
+              the Orientation Heatmap, so the diagrams are real per-facade data. They share
+              one matrix (the chart reads its monthlyTotals, the heatmap its cell grid).
+              Tracks the viewport so it pans/zooms with the canvas; renders BEHIND the minimap. */}
+          {(statsMode === "irradiance" || statsMode === "insolation") &&
+            unravelOn &&
+            unravelResult &&
+            unravelResult.segments.length > 0 &&
+            (() => {
+              const anchorSeg =
+                (focusedPanel !== null
+                  ? unravelResult.segments.find((s) => s.index === focusedPanel)
+                  : undefined) ?? unravelResult.segments[0];
+              const bearing = faceBearings[anchorSeg.index];
+              if (bearing === undefined) return null; // no resolvable orientation (open loop)
+              const matrix = buildRadiationMatrix(activeSolar, bearing);
+              const pos = toScreen(viewport, { x: anchorSeg.x0, y: 0 });
+              return (
+                <div
+                  className="stats-dropdown stats-dropdown--behind"
+                  role="region"
+                  aria-label={statsMode === "irradiance" ? "Irradiance diagram" : "Insolation chart"}
+                  style={{ position: "absolute", left: pos.x - 8, top: pos.y + 16, pointerEvents: "none" }}
+                >
+                  {statsMode === "irradiance" ? (
+                    <RadiationDiagram matrix={matrix} />
+                  ) : (
+                    <InsolationChart matrix={matrix} />
+                  )}
+                </div>
+              );
+            })()}
+          {/* PERIMETER STATISTICS OVERLAY — the Building Perimeter tab counterpart of the
+              unravel overlay above. Shows footprint stats for the CLOSED perimeter, in the
+              same .stats-dropdown style. Anchored at the outline's LEFT-most x and BOTTOM-
+              most y (curve-accurate extents, so a bulging curve is respected), offset DOWN
+              so the box clears the drawn shape without overlapping it. Tracks the viewport,
+              so it pans/zooms with the canvas. */}
+          {statsMode === "general" && !unravelOn && perimeter.closed && (() => {
+            const outline = flattenPerimeter(perimeter);
+            if (outline.length === 0) return null;
+            let minX = Infinity;
+            let maxX = -Infinity;
+            let minY = Infinity;
+            let maxY = -Infinity;
+            for (const q of outline) {
+              if (q.x < minX) minX = q.x;
+              if (q.x > maxX) maxX = q.x;
+              if (q.y < minY) minY = q.y;
+              if (q.y > maxY) maxY = q.y;
+            }
+            // Anchor: left-most x (alignment) + bottom-most y (model +Y up → largest screen
+            // y), so adding to `top` drops the box below the footprint.
+            const pos = toScreen(viewport, { x: minX, y: minY });
+            // A closed loop has one wall (edge) per vertex.
+            const wallCount = perimeter.vertices.length;
+            return (
+              <div
+                className="stats-dropdown stats-dropdown--behind"
+                role="region"
+                aria-label="Live statistics"
+                style={{ position: "absolute", left: pos.x - 8, top: pos.y + 24, pointerEvents: "none" }}
+              >
+                <div className="stats-dropdown__title">General</div>
+                <div className="readout">
+                  <span className="readout__key">Walls</span>
+                  <span className="readout__val">{wallCount}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Perimeter</span>
+                  <span className="readout__val">{fmtLength(perimeterLength(perimeter), 3)}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Footprint area</span>
+                  <span className="readout__val">{fmtArea(enclosedArea(perimeter), 3)}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Extents</span>
+                  <span className="readout__val">
+                    {fmtLength(maxX - minX, 2)} × {fmtLength(maxY - minY, 2)}
+                  </span>
                 </div>
               </div>
             );
@@ -5115,8 +5316,22 @@ export default function PolylineTool() {
               edges={exportPopup}
               heights={unravelHeights}
               defaultHeight={unravelHeight}
+              facadeRecords={{
+                cells: unravelCells,
+                divisions: panelDivisions,
+                dividersH: panelDividersH,
+                mullionsV: panelMullionsV,
+                mullionsH: panelMullionsH,
+                cellFraming: panelCellFraming,
+              }}
+              unravelGap={unravelGap}
               stageRef={wrapRef}
-              onClose={() => setExportPopup(null)}
+              onClose={() => {
+                // Closing the popup (× or Esc) drops the marquee selection too, so the
+                // highlighted elevations clear rather than lingering selected on-canvas.
+                setExportPopup(null);
+                setExportSelection(new Set());
+              }}
             />
           )}
           {/* OVERVIEW MAP — small draggable navigator at the BOTTOM-LEFT of the
@@ -5312,7 +5527,9 @@ function ControlsList() {
       <li><b>Wheel / pinch</b> zoom (at cursor) · <b>Middle-drag / Right-drag</b> pan</li>
       <li><b>Ctrl+Z / Ctrl+Y</b> undo / redo (Ctrl+Shift+Z also redoes)</li>
       <li><b>Ctrl+S</b> save perimeter → mini-window (top-right)</li>
-      <li><b>Statistics</b> (top, next to Redo) toggle a dropdown of live stats for the current view (perimeter, or unravel when in elevation) · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · Esc or re-click to close · stays open while you work</li>
+      <li><b>Statistics</b> (top, next to Redo) toggle a dropdown of live stats for the current view (perimeter, or unravel when in elevation) · enabled only once a <b>closed perimeter</b> exists (re-locks if the shape is reopened) · Esc or re-click to close · stays open while you work · pick <b>General</b>, <b>Irradiance (W/m²)</b>, or <b>Insolation (kWh/m²)</b> · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu (skips the two solar diagrams outside the elevation views) ·in the unravel view the readout left-aligns under the <b>left-most</b> elevation by default, and re-anchors to the <b>left edge of the selected wall border</b> once you click one</li>
+      <li><b>Irradiance (W/m²)</b> (Statistics menu, elevation views only) draws a <b>Ladybug-style heatmap</b> on the selected wall border — <b>months</b> across, <b>hour of day</b> up the side, cells coloured by clear-sky solar <b>irradiance</b> (instantaneous power) on that wall · pulls the wall's true <b>cardinal orientation</b> and the <b>Solar Study</b> location/north so each elevation reads differently · shows the annual <b>kWh/m²·yr</b> total</li>
+      <li><b>Insolation (kWh/m²)</b> (Statistics menu, elevation views only) the energy companion to Irradiance — a <b>monthly bar chart</b> of the solar <b>energy</b> the same wall receives each month (Jan→Dec), bars coloured on the same cold→hot ramp so a tall warm bar reads as a high-radiation month · same orientation / Solar Study source and annual <b>kWh/m²·yr</b> total</li>
       <li><b>Render</b> · <b>Constraint</b> (top row, just left of the Projects minimap, in line with Undo/Redo) toggle blue when selected / white when deselected like the other tool buttons · enabled only once you leave the <b>Building Perimeter</b> tab (in the elevation/unravel views)</li>
       <li><b>Export</b> (nav header, between Smart Search and Settings) arms the <b>wall-selection marquee</b> in the elevation/unravel views (blue while armed; disabled in the Building Perimeter tab) · <b>click-drag</b> a box over the panels to select every wall it touches (selected walls highlight <b>green</b>) · <b>release</b> opens the export dialog · <b>Esc</b> cancels</li>
       <li><b>Export dialog</b> shows a 3D preview of <b>only the selected walls</b> (<b>drag</b> to orbit · drag the title bar to move) · <b>Revit / AutoCAD / Rhino</b> buttons download a <b>DXF</b> that preserves real dimensions in <b>feet</b> · click outside to flash · <b>Esc</b> / <b>×</b> to close</li>
@@ -5330,13 +5547,13 @@ function ControlsList() {
       <li><b>Click a panel</b> (Unroll Elevations) selects + zooms it (its width/height labels turn grey) and enables the <b>CW Type</b> button (bottom-left cluster) — the only cluster button available until a type is assigned · click the empty canvas (or Esc) to step back out</li>
       <li><b>← / → arrow keys</b> (while zoomed into a wall border) jump to the <b>previous / next border</b> along the strip — the same animated zoom-in as clicking the neighbouring panel, wrapping around the loop · the focused border also lights <b>red on the 3D minimap</b> (as if moused over) so you can track which wall is in focus</li>
       <li><b>CW Type</b> (first in the bottom-left cluster) assigns the curtain-wall system <b>per panel</b> — select a panel, then click (chevron ▾ marks the menu) to choose <b>Stick System</b> or <b>Unitized System</b> · the button shows the selected panel's "CW Type: <i>name</i>" · assigning a type <b>unlocks the rest of the row — Floor Lines, Centerlines, Framing</b> (all stay disabled until a panel's CW Type is set) · a panel holds only ONE system, so switching its type <b>clears that panel's framing of the other system</b> (its centerlines are kept)</li>
-      <li><b>Framing</b> (last in the bottom-left cluster) becomes available once the selected panel has a CW Type, and acts in the <b>Wall Border</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal) · with the tool armed, <b>clicking a different wall border</b> (away from this panel's lines) reframes to it with <b>Framing still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · the <b>eye icon</b> on the button's right edge shows / hides all framing on the canvas without deleting it</li>
+      <li><b>Framing</b> (last in the bottom-left cluster) becomes available once the selected panel has a CW Type, and acts in the <b>Wall Border</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal) · with the tool armed, <b>clicking a different wall border</b> (away from this panel's lines) reframes to it with <b>Framing still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · <b>clicking the empty white canvas</b> (off any panel) deselects the tool · the <b>eye icon</b> on the button's right edge shows / hides all framing on the canvas without deleting it</li>
       <li>with the <b>Unitized System</b>, hover a cell's centerlines to highlight the <b>single nearest edge</b> of the cell under the cursor, then <b>click-drag</b> to inset that one edge <b>into the cell</b> in <b>0.25′</b> increments · hold <b>Shift</b> while dragging to inset <b>all four edges</b> of that cell together · each framed edge draws the solid frame face inset into the cell AND turns the affected <b>centerline segment solid</b> on top of the dashed centerline (the framed mullion) · the edit <b>mirrors live to every same-shape (Material ID) cell</b> across all elevations/panels — editing one cell updates all identical cells project-wide (see the <b>View</b> button's Material ID colours / <b>Unique cells</b> count for the groups)</li>
       <li><b>Type</b> (right of Framing) becomes available once the selected wall border has <b>at least one frame</b> created · arms/blue like the other cluster tools and is disabled in the <b>Building Perimeter</b> tab · the <b>eye icon</b> on its right edge will show / hide the frame types on the canvas <i>(scaffolded — assignment + rendering are not wired up yet)</i></li>
-      <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · with the tool armed, <b>clicking a different wall border</b> reframes to it with <b>Centerlines still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · the <b>eye icon</b> on the button's right edge shows / hides all centerlines on the canvas without deleting them · Esc or re-click the button to finish</li>
+      <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · with the tool armed, <b>clicking a different wall border</b> reframes to it with <b>Centerlines still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · <b>clicking the empty white canvas</b> (off any panel) deselects the tool · the <b>eye icon</b> on the button's right edge shows / hides all centerlines on the canvas without deleting them · Esc or re-click the button to finish</li>
       <li><b>Erase</b> (bottom-right cluster, just left of the <b>?</b> help button) arms the delete tool and works in BOTH views · <b>Building Perimeter view:</b> hover a perimeter <b>vertex</b> (it turns <b>red</b>) and <b>click</b> to delete it, or <b>click-drag</b> across several vertices to remove them all in one stroke (committed as one undo step; dropping below 3 points reopens the shape) · hover a perimeter <b>edge</b> away from its corners (closed shape only) to highlight that segment <b>red</b> and <b>click</b> to remove it — <b>reopening the loop there while keeping both vertices</b> — or <b>click-drag</b> along the boundary to erase several segments at once · any vertex left <b>alone</b> by losing both its walls (e.g. between two erased edges) is <b>auto-deleted</b> too (it pre-highlights red) ·<b>Unravel view:</b> <b>hover</b> near a panel's centerline <em>or</em> a floor plate to highlight it, <b>click</b> deletes it, and <b>click-drag</b> across multiple lines erases them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · erasing a panel's centerline also <b>clears that panel's framing</b> on that axis (the same way adding a centerline does — re-apply framing afterwards), so no frame bars linger along the border without their centerlines · the default <b>0′ ground floor line</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor Lines</li>
       <li><b>Dim</b> (bottom-right cluster, right of Erase) — clicking the word does nothing yet; its <b>eye icon</b> is the single source of truth for the on-canvas <b>dimensions</b> (the panel width / per-column-row / cell labels and the height input fields across the <b>Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs) · click the eye to show / hide them all (visible by default) · disabled in the <b>Building Perimeter</b> tab · <b>no view (Clean / Shadows) auto-hides dimensions</b> — only the Dim eye does</li>
-      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>Technical</b> is the default drafting look (centerlines, framing, and dimensions) · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) and labels each cell with its <b>shape number</b> at its centre (same shape ⇒ same number, like a paint-by-number key) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a vivid cold→hot thermal gradient — <b>N = blue</b>, <b>E = cyan</b>, <b>S = yellow</b>, <b>W = red</b>, with NE/SE/SW/NW on the blends between (sweeping through green and orange) — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map · <b>Clean</b> renders a presentation view — the panels fill <b>white</b> behind the framing · <b>no view ever auto-hides floor lines, centerlines, framing, or dimensions</b> — those four are shown/hidden ONLY by their per-button toggles (the eye icons and the <b>Dim</b> button) · <b>Shadows</b> is a 2.5D presentation built on Clean — every framing bar (Stick mullions + Unitized cell framing) reads as raised above the glass and casts a crisp, hard-edged <b>drop shadow</b> onto the glass beside it (falling into cells and across into neighbours, but never on the frame infill); the shadow length scales with zoom · the elevation/panel/assembly geometry is drawn <b>monochrome</b> (blue/teal tints dropped for neutral greys), while the red + blue hover highlights stay coloured</li>
+      <li><b>View</b> (top-left, right of Statistics; unravel view only) <b>click</b> opens a dropdown (chevron ▾) to pick the display mode — purely visual, arms no tool · <b>scroll the wheel over the button</b> to cycle the modes without opening the menu ·<b>Technical</b> is the default drafting look (centerlines, framing, and dimensions) · <b>Material ID</b> tints every grid cell by its geometric <b>shape</b> so identical cells across the whole project share one colour (Lumion-style) and labels each cell with its <b>shape number</b> at its centre (same shape ⇒ same number, like a paint-by-number key) · the live <b>Unique cells</b> count in the <b>Statistics</b> dropdown reports how many distinct cell shapes exist (a panel with no centerlines counts as one large cell) · <b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces on a vivid cold→hot thermal gradient — <b>N = blue</b>, <b>E = cyan</b>, <b>S = yellow</b>, <b>W = red</b>, with NE/SE/SW/NW on the blends between (sweeping through green and orange) — and labels the cell's <b>cardinal direction</b> (N, NE, E…) at its centre · facings come from each facade's real outward normal rotated by the <b>Solar Study</b>'s North, so rotating North in the Solar Study re-colours the map · <b>Clean</b> renders a presentation view — the panels fill <b>white</b> behind the framing · <b>no view ever auto-hides floor lines, centerlines, framing, or dimensions</b> — those four are shown/hidden ONLY by their per-button toggles (the eye icons and the <b>Dim</b> button) · <b>Shadows</b> is a 2.5D presentation built on Clean — every framing bar (Stick mullions + Unitized cell framing) reads as raised above the glass and casts a crisp, hard-edged <b>drop shadow</b> onto the glass beside it (falling into cells and across into neighbours, but never on the frame infill); the shadow length scales with zoom · the elevation/panel/assembly geometry is drawn <b>monochrome</b> (blue/teal tints dropped for neutral greys), while the red + blue hover highlights stay coloured</li>
       <li><b>Hover an edge</b> (edit mode) highlights that edge's line on the active mini-window thumbnail · in unravel, hovering a panel lights its wall instead</li>
       <li><b>Projects panel:</b> click load (fits the shape to the view) · drag preview to rotate · double-click preview for top-down plan view · drag title to move · ☀ toggle a larger <b>Solar Study</b> popup · ✎ rename · <b>⧉ duplicate</b> the whole project (perimeter, elevations, framing — everything) into a new <i>Option</i> · <b>× delete</b> — <b>undoable</b> with Ctrl+Z (Ctrl+Y redoes) · <b>＋ footer</b> (Building Perimeter tab only) saves the current sketch as a new project</li>
       <li><b>Solar Study</b> (☀ popup) draws a 3D <b>sun-path dome</b> around the massing from real solar geometry · drag to rotate · double-click for an aerial top-down view (synced with the thumbnail) · <b>Orientation dial</b> — drag the needle (or type degrees) to set the drawing's North relative to the cardinal directions · <b>Date</b> and <b>Solar time</b> sliders move the sun along its path (with a live altitude / azimuth readout) · <b>Latitude</b> field (temporary Omaha, NE default until the address is geocoded) · Location field inherits the sketch's address · settings are saved with the sketch</li>

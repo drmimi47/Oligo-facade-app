@@ -62,7 +62,7 @@ interface Projected {
  * an open shell. Each wall carries the source EDGE index so a hovered unravel
  * strip can highlight the right wall.
  */
-interface Face {
+export interface Face {
   /** Ring of 3D vertices defining the wall quad. */
   pts: Vec3[];
   /** The original perimeter edge index this wall came from. */
