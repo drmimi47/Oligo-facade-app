@@ -88,12 +88,20 @@ export default function OverviewMap({
   // switch to explicit left/top coordinates (CSS px within the stage).
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
+  // Handle of the in-flight "reset to default" animation (rAF id), so a new drag /
+  // unmount can cancel it cleanly.
+  const resetAnimRef = useRef<number | null>(null);
 
   // --- Drag anywhere on the overview to reposition (clamped to the stage). ---
   const onPointerDown = (e: React.PointerEvent) => {
     const win = winRef.current;
     const stage = stageRef.current;
     if (!win || !stage) return;
+    // Grabbing the window cancels any running snap-back animation so the drag wins.
+    if (resetAnimRef.current !== null) {
+      cancelAnimationFrame(resetAnimRef.current);
+      resetAnimRef.current = null;
+    }
     const winRect = win.getBoundingClientRect();
     const stageRect = stage.getBoundingClientRect();
     dragRef.current = { offX: e.clientX - winRect.left, offY: e.clientY - winRect.top };
@@ -124,6 +132,60 @@ export default function OverviewMap({
     dragRef.current = null;
     (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
   };
+
+  // --- Double-click: SMOOTHLY animate back to the default (CSS-anchored) position
+  // instead of teleporting. We measure the anchored spot by momentarily clearing the
+  // inline offsets and reading the laid-out rect (synchronous — no paint between, so no
+  // flash), then tween `pos` from where it sits now to that target with rAF, and finally
+  // drop back to `pos = null` so CSS owns the resting position again. ---
+  const resetToDefault = () => {
+    const win = winRef.current;
+    const stage = stageRef.current;
+    // No element to measure → fall back to the instant reset.
+    if (!win || !stage) {
+      setPos(null);
+      return;
+    }
+    const stageRect = stage.getBoundingClientRect();
+    const startRect = win.getBoundingClientRect();
+    const start = { x: startRect.left - stageRect.left, y: startRect.top - stageRect.top };
+    // Measure the DEFAULT anchored position: clear the inline offsets, read, restore.
+    const prev = {
+      left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
+    };
+    win.style.left = ""; win.style.top = ""; win.style.right = ""; win.style.bottom = "";
+    const defRect = win.getBoundingClientRect();
+    const target = { x: defRect.left - stageRect.left, y: defRect.top - stageRect.top };
+    win.style.left = prev.left; win.style.top = prev.top; win.style.right = prev.right; win.style.bottom = prev.bottom;
+    // Already at (or within a pixel of) the default → just release to CSS, no animation.
+    if (Math.abs(start.x - target.x) < 0.5 && Math.abs(start.y - target.y) < 0.5) {
+      setPos(null);
+      return;
+    }
+    if (resetAnimRef.current !== null) cancelAnimationFrame(resetAnimRef.current);
+    const DURATION_MS = 220;
+    const t0 = performance.now();
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / DURATION_MS);
+      const k = easeOutCubic(t);
+      setPos({ x: start.x + (target.x - start.x) * k, y: start.y + (target.y - start.y) * k });
+      if (t < 1) {
+        resetAnimRef.current = requestAnimationFrame(step);
+      } else {
+        resetAnimRef.current = null;
+        setPos(null); // settle onto the CSS anchor (same spot the tween ended on)
+      }
+    };
+    resetAnimRef.current = requestAnimationFrame(step);
+  };
+
+  // Cancel any in-flight snap-back animation on unmount.
+  useEffect(() => {
+    return () => {
+      if (resetAnimRef.current !== null) cancelAnimationFrame(resetAnimRef.current);
+    };
+  }, []);
 
   // Keep the window inside the stage if it shrinks (e.g. resize) with a manual pos.
   useEffect(() => {
@@ -251,7 +313,7 @@ export default function OverviewMap({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onDoubleClick={() => setPos(null)}
+      onDoubleClick={resetToDefault}
     >
       {/* ===== FIT-TO-VIEW SCENE + CURRENT-VIEW RECT ===== */}
       <div className="overview__body">

@@ -58,6 +58,7 @@
   --color-positive: #1f9d6b;        /* Closed perimeter, first-vertex affordance */
   --color-danger: #d23154;          /* Destructive actions, selected vertex */
   --color-danger-wash: rgba(210, 49, 84, 0.10); /* Tint behind danger hover */
+  --color-warn: #b8730b;            /* Caution / incomplete-data flag (e.g. provisional stats) */
 
   /* === COLOR · CONTROLS === */
   --control-bg: #ffffff;            /* Inputs / buttons background */
@@ -90,6 +91,8 @@
   --unravel-highlight-fill: rgba(210,49,84,0.18); /* Hovered unravel rectangle fill */
   --unravel-highlight-color: #d23154; /* Hovered unravel rect outline + linked shape edge (mini-window) */
   --unravel-cell-highlight-fill: rgba(31,111,235,0.18); /* Hovered individual CELL fill (Panels phase) — accent blue so it reads as selectable, distinct from the warm whole-panel hover */
+  /* Cell SELECTION (Wall Border phase, Type tool): the blue tint drawn on each selected cell. Matches the hover highlight exactly — no outline, no extra darkening — so the fill alone marks the selection. */
+  --unravel-cell-select-fill: rgba(31,111,235,0.18);
   --unravel-clean-fill: #ffffff; /* CLEAN view: opaque white glass fill behind the framing (centerlines / floor plates / dimensions hidden) */
   --unravel-edge-select: #e5484d; /* Assembly phase: the focused cell's top/right/bottom/left EDGE under the cursor, stroked red to mark it as selected (one edge at a time) */
   --unravel-mullion-color: #4f8aa0; /* Mullions tool (Stick system): the paired mullion-face lines drawn to either side (±offset) of each grid line */
@@ -180,6 +183,18 @@
      current day + hour. Subordinate to the cardinal, so a smaller font; same inverted
      'difference' blend, so no colour token. Only drawn on cells tall enough for two lines. */
   --orient-sun-font: 10px ui-monospace, monospace;
+
+  /* === CELL TYPE HATCH (the "Type" tool) ===
+     The Type tool assigns a glazing type to each grid CELL (Vision / Spandrel / Opaque);
+     the renderer overlays a HATCH so a typed facade reads at a glance. The type is conveyed
+     ONLY by the hatch PATTERN, never by colour — every hatch uses the one default cell blue
+     below so cells keep their normal appearance. Vision = sparse "/" diagonal, Spandrel =
+     "/"+"\" cross-hatch, Opaque = a dot matrix. The colour carries its own alpha so the
+     hatch sits lightly over the cell fill; the Type submenu swatches reuse this colour. */
+  --celltype-hatch-color: rgba(31, 111, 235, 0.55);  /* Default cell blue — shared by every type */
+  --celltype-hatch-color-mono: rgba(70, 70, 70, 0.55);  /* Monochrome variant — used in the SHADOWS view (no colours), same weight as the blue */
+  --celltype-hatch-width: 1;   /* Hatch line / dot weight (screen px) */
+  --celltype-hatch-gap: 8;     /* Spacing between hatch lines / dots (screen px) */
 
   /* === FLOOR PLATES (horizontal level reference lines) ===
      Dotted horizontal lines placed via the "floor plate" tool. Shown in both the
@@ -483,6 +498,7 @@
   --color-positive: #5cd6a0;
   --color-danger: #ff5c7c;
   --color-danger-wash: rgba(255, 92, 124, 0.12);
+  --color-warn: #e0a030;            /* Caution / incomplete-data flag — brighter for dark mode */
 
   /* === COLOR · CONTROLS === */
   --control-bg: #2a313a;
@@ -515,6 +531,8 @@
   --unravel-highlight-fill: rgba(255,92,124,0.22);
   --unravel-highlight-color: #ff5c7c;
   --unravel-cell-highlight-fill: rgba(127,178,255,0.24); /* Hovered individual CELL fill (Panels phase) — accent blue */
+  /* Cell SELECTION (Wall Border phase, Type tool) — matches the hover tint (no outline) */
+  --unravel-cell-select-fill: rgba(127,178,255,0.24);
   --unravel-edge-select: #ff6166; /* Assembly phase: hovered focused-cell edge — brighter red for dark mode */
   --unravel-mullion-color: #6fb0c6; /* Mullions tool: paired mullion-face lines — lifted for dark mode */
   /* Export selection / marquee — a brighter green so it pops on the dark canvas. */
@@ -984,6 +1002,16 @@ input[type="checkbox"] {
 /* Never break the value across lines (e.g. an Extents "# ft × # ft" pair) — the box grows
    to fit instead (see .stats-dropdown width: max-content). */
 .readout__val { color: var(--color-text); white-space: nowrap; }
+/* PROVISIONAL stats (e.g. WWR / VLT before every cell is typed): the COVERAGE line carries a
+   caution colour, the affected values dim to read as not-yet-final, and a footnote explains. */
+.readout--warn .readout__val { color: var(--color-warn); }
+.readout--provisional .readout__val { color: var(--color-text-dim); }
+.stats-dropdown__note {
+  margin-top: var(--space-1);
+  color: var(--color-warn);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
 
 /* === HELP LIST === */
 .help {
@@ -1340,7 +1368,9 @@ input[type="checkbox"] {
   color: var(--color-text-on-accent);
   border-left-color: var(--color-text-on-accent);
 }
-/* Disabled in lockstep with the parent button (mirror the dimmed + not-allowed pattern). */
+/* Dimmed + not-allowed when the eye's OWN gate is unmet. Usually that tracks the parent
+   button, but the Type eye is decoupled — it stays enabled whenever any cell type exists,
+   even when the Type button itself is disabled (no selection). */
 .vis-toggle:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -1397,6 +1427,71 @@ input[type="checkbox"] {
   background: var(--control-bg-active);
   color: var(--color-text-on-accent);
 }
+/* Gated submenu items (e.g. the Type chooser's options outside the Cells tab) read as
+   unavailable: dimmed and non-interactive, with no hover affordance. */
+.cw-menu__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.cw-menu__btn:disabled:hover { background: transparent; }
+
+/* === TYPE chooser submenu (the "Type" tool) ===
+   Reuses the .cw-menu drop-up; each option carries a leading SWATCH that PREVIEWS the type's
+   hatch PATTERN (same blue, same /\ / cross-hatch convention as the canvas) over the default
+   cell-blue fill — so the menu and canvas read consistently and the type is told apart by
+   pattern alone, the type NAME, and its industry-standard VLT pushed to the right edge. The
+   active option (the focused cell's current type) inherits the .is-active accent fill above. */
+.cw-menu__btn--type { display: inline-flex; align-items: center; gap: var(--space-2); }
+.type-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--control-border);
+  background-color: var(--unravel-rect-fill); /* the default cell blue tint, like the canvas */
+  background-repeat: repeat;
+  flex: 0 0 auto;
+}
+/* Pattern previews (all in the shared --celltype-hatch-color), mirroring the renderer:
+   "/" for Vision, "/"+"\" cross-hatch for Spandrel, a DOT MATRIX for Opaque. */
+.type-swatch--vision {
+  /* Wider spacing than Spandrel so the single-direction Vision hatch reads lighter. */
+  background-image: repeating-linear-gradient(135deg, var(--celltype-hatch-color) 0 1px, transparent 1px 6px);
+}
+.type-swatch--spandrel {
+  background-image:
+    repeating-linear-gradient(135deg, var(--celltype-hatch-color) 0 1px, transparent 1px 4px),
+    repeating-linear-gradient(45deg, var(--celltype-hatch-color) 0 1px, transparent 1px 4px);
+}
+.type-swatch--opaque {
+  background-image: radial-gradient(var(--celltype-hatch-color) 1px, transparent 1.3px);
+  background-size: 4px 4px;
+  background-position: 1px 1px;
+}
+/* None: an EMPTY swatch with a single muted diagonal slash — the classic "none / clear"
+   mark, signalling the cell is untyped (no hatch on the canvas). */
+.type-swatch--none {
+  background-color: transparent;
+  background-image: linear-gradient(
+    135deg,
+    transparent calc(50% - 0.75px),
+    var(--control-border) calc(50% - 0.75px),
+    var(--control-border) calc(50% + 0.75px),
+    transparent calc(50% + 0.75px)
+  );
+}
+/* Type name takes the slack so the VLT value sits flush right; the VLT reads as a
+   subordinate spec (dimmed, monospace, with a little breathing room from the name). */
+.type-name { flex: 1 1 auto; }
+.type-vlt {
+  flex: 0 0 auto;
+  margin-left: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-small);
+  color: var(--color-text-dim);
+}
+/* Over the accent fill of the active option, lift the dimmed VLT to the on-accent colour
+   so it stays legible (mirrors how .is-active flips the rest of the row). */
+.cw-menu__btn--type.is-active .type-vlt { color: var(--color-text-on-accent); }
 
 /* === VIEW display-mode menu ===
    The "View" button (top-left, next to Statistics) opens this list of display modes.

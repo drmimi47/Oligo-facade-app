@@ -180,6 +180,29 @@ export interface UnravelDraw {
     label: string;
     sun?: string;
   }>;
+  /**
+   * PER-CELL TYPE (the "Type" tool): each entry is the GLASS-INFILL rect of one typed cell
+   * (x0..x1, y0..y1 in model space — already the cell MINUS its extruded frame members) plus
+   * its assigned glazing `type` (Vision / Spandrel / Opaque). The renderer overlays a per-
+   * type HATCH inside that rect so the elevation reads as a typed facade; the hatch never
+   * touches the framing (the frame area is the non-glazed infill). Present in every view
+   * (facade spec, not a view mode); only populated while the Type eye is on and the cell
+   * carries a type. Undefined = nothing typed on this panel.
+   */
+  cellTypes?: Array<{
+    x0: number;
+    x1: number;
+    y0: number;
+    y1: number;
+    type: "vision" | "spandrel" | "opaque";
+  }>;
+  /**
+   * SHADOWS view only: the glass-infill rects of OPAQUE cells. An opaque infill panel sits
+   * FLUSH with the frame face (not recessed like vision/spandrel glass), so no cast shadow
+   * lands on it — the renderer punches these rects out of the shadow clip. Independent of the
+   * Type-hatch visibility toggle (it's a property of the assigned type, not a view preference).
+   */
+  opaqueCells?: Array<{ x0: number; x1: number; y0: number; y1: number }>;
 }
 
 /** Transient interaction state the renderer needs to draw feedback. */
@@ -261,6 +284,13 @@ export interface RenderState {
    * navigable cells. Suppressed in OVERVIEW boundaries-only mode.
    */
   hoveredCell?: { x0: number; x1: number; y0: number; y1: number } | null;
+  /**
+   * UNRAVEL view (Wall Border phase) only: the model-space rectangles of the grid cells
+   * the user has SELECTED for glazing-type assignment, each tagged with its owning edge
+   * (so a project-wide Shift+select can highlight cells on more than one panel). Drawn
+   * with a stronger fill + outline than the hover tint. Empty/undefined = nothing selected.
+   */
+  selectedCells?: Array<{ edge: number; x0: number; x1: number; y0: number; y1: number }> | null;
   /**
    * UNRAVEL view only: original edge index of the panel currently SELECTED via
    * double-click (the active target for the Additive / Subtractive operations), or
@@ -465,6 +495,10 @@ export function render(
     frameMonoFrame: cssVar(canvas, "--frame-mono-frame", "#6e6e6e"),
     // Per-cell hover tint (Panels phase): a single grid cell lit under the cursor.
     unravelCellHighlightFill: cssVar(canvas, "--unravel-cell-highlight-fill", "rgba(31,111,235,0.18)"),
+    // Cell SELECTION (Wall Border phase, Type tool): the blue tint drawn on each cell the
+    // user has selected for type assignment. Matches the hover highlight (no outline) — the
+    // fill alone marks the selection.
+    unravelCellSelectFill: cssVar(canvas, "--unravel-cell-select-fill", "rgba(31,111,235,0.18)"),
     // Assembly phase: red stroke for the focused cell's hovered top/right/bottom/left edge.
     unravelEdgeSelect: cssVar(canvas, "--unravel-edge-select", "#e5484d"),
     // Material-ID cell view: HSL saturation / lightness (%) and fill alpha for the
@@ -485,6 +519,16 @@ export function render(
       parseHexRGB(cssVar(canvas, "--orient-stop-3", "#ff2d1c")),
     ],
     orientAlpha: cssNum(canvas, "--orient-fill-alpha", 1),
+    // PER-CELL TYPE hatch (Type tool): a SINGLE hatch stroke colour (the default cell blue)
+    // shared by every type — the type is conveyed only by the hatch PATTERN, never colour —
+    // plus the hatch line WIDTH and SPACING (screen px). Vision is a sparse single-direction
+    // hatch, Spandrel the opposite diagonal, Opaque a dense cross-hatch.
+    cellTypeHatch: cssVar(canvas, "--celltype-hatch-color", "rgba(31,111,235,0.55)"),
+    // MONOCHROME variant of the type hatch — used in the SHADOWS view, which is fully
+    // greyscale (no colours). Same weight, neutral grey instead of the cell blue.
+    cellTypeHatchMono: cssVar(canvas, "--celltype-hatch-color-mono", "rgba(70,70,70,0.55)"),
+    cellTypeHatchW: cssNum(canvas, "--celltype-hatch-width", 1),
+    cellTypeHatchGap: cssNum(canvas, "--celltype-hatch-gap", 8),
     // Mullions tool: the paired mullion-face lines drawn ±offset around each grid line.
     unravelMullion: cssVar(canvas, "--unravel-mullion-color", "#5b94a8"),
     highlight: cssVar(canvas, "--unravel-highlight-color", "#d23154"),
@@ -546,6 +590,7 @@ export function render(
       state.selectedUnravelPanel ?? -1,
       state.cellDimEdge ?? -1,
       state.hoveredCell ?? null,
+      state.selectedCells ?? null,
       state.dividePreview ?? null,
       state.eraseHighlight ?? [],
       state.focusedCellDims ?? null,
@@ -974,6 +1019,8 @@ function drawUnravel(
   /** PANELS phase: edge index of the focused panel to dimension per column/row, or -1. */
   cellDimEdge: number,
   hoveredCell: { x0: number; x1: number; y0: number; y1: number } | null,
+  /** WALL BORDER phase: cells SELECTED for type assignment (each tagged with its edge). */
+  selectedCells: Array<{ edge: number; x0: number; x1: number; y0: number; y1: number }> | null,
   dividePreview: {
     edge: number;
     xs?: number[];
@@ -1014,6 +1061,7 @@ function drawUnravel(
     frameMonoOutline: string;
     frameMonoFrame: string;
     unravelCellHighlightFill: string;
+    unravelCellSelectFill: string;
     unravelEdgeSelect: string;
     cellViewSat: number;
     cellViewLight: number;
@@ -1021,6 +1069,10 @@ function drawUnravel(
     cellViewShadeFalloff: number;
     orientStops: RGB[];
     orientAlpha: number;
+    cellTypeHatch: string;
+    cellTypeHatchMono: string;
+    cellTypeHatchW: number;
+    cellTypeHatchGap: number;
     unravelMullion: string;
     highlight: string;
     exportSelectFill: string;
@@ -1034,7 +1086,7 @@ function drawUnravel(
     floorPlate: string;
   },
 ): void {
-  for (const { seg, height, cells, divisions, dividersH, mullionV, mullionH, mullionHoverAxis, cellFraming, frameHover, cellColors, cellOrient } of draws) {
+  for (const { seg, height, cells, divisions, dividersH, mullionV, mullionH, mullionHoverAxis, cellFraming, frameHover, cellColors, cellOrient, cellTypes, opaqueCells } of draws) {
     // Guard against a non-positive height so the rectangle always has visible area.
     const h = Math.max(height, 0);
     // Rectangle corners: baseline (y=0) to top (y=height), spanning x0..x1.
@@ -1113,15 +1165,109 @@ function drawUnravel(
       }
     }
 
+    // PER-CELL TYPE hatch (Type tool): overlay each typed cell's GLASS-INFILL rect (the cell
+    // minus its extruded frame members) with a pattern that signifies its glazing type —
+    // Vision a sparse "/" diagonal, Spandrel a "/"+"\" cross-hatch, Opaque a dot matrix.
+    // Clipping to the glass rect keeps the pattern off the framing (frame = the non-glazed
+    // area). Drawn over any fill but UNDER the grid lines / outline below so the framing
+    // stays crisp, and in EVERY view (it's facade spec, not a view mode).
+    if (cellTypes && cellTypes.length > 0) {
+      for (const ct of cellTypes) {
+        const c0 = toScreen(vp, { x: ct.x0, y: ct.y0 });
+        const c1 = toScreen(vp, { x: ct.x1, y: ct.y1 });
+        const rx = Math.min(c0.x, c1.x);
+        const ry = Math.min(c0.y, c1.y);
+        const rw = Math.abs(c1.x - c0.x);
+        const rh = Math.abs(c1.y - c0.y);
+        if (rw < 1 || rh < 1) continue;
+        // One shared colour for every type — the type is told apart by PATTERN only.
+        // The SHADOWS view is fully monochrome, so the hatch drops its blue for neutral grey.
+        const color = shadows ? tk.cellTypeHatchMono : tk.cellTypeHatch;
+        const gap = tk.cellTypeHatchGap;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rx, ry, rw, rh);
+        ctx.clip();
+        if (ct.type === "opaque") {
+          // Opaque: a regular MATRIX OF DOTS. Dot radius scales with the line width so it
+          // reads at the same weight as the other patterns.
+          const r = Math.max(0.75, tk.cellTypeHatchW * 1.1);
+          ctx.fillStyle = color;
+          for (let y = ry + gap / 2; y <= ry + rh; y += gap) {
+            for (let x = rx + gap / 2; x <= rx + rw; x += gap) {
+              ctx.beginPath();
+              ctx.arc(x, y, r, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        } else {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = tk.cellTypeHatchW;
+          ctx.beginPath();
+          // Vision is a SINGLE-direction hatch, so it's spaced wider than Spandrel's cross-
+          // hatch — fewer lines so it reads lighter than the denser Spandrel pattern.
+          const lineGap = ct.type === "vision" ? gap * 1.7 : gap;
+          // "/" diagonals (Vision + Spandrel): sweep the line's x-intercept across the rect
+          // so a 45° line covers the whole clipped area.
+          for (let x = rx - rh; x <= rx + rw; x += lineGap) {
+            ctx.moveTo(x, ry + rh);
+            ctx.lineTo(x + rh, ry);
+          }
+          // "\" diagonals — Spandrel only, completing the cross-hatch.
+          if (ct.type === "spandrel") {
+            for (let x = rx; x <= rx + rw + rh; x += gap) {
+              ctx.moveTo(x, ry);
+              ctx.lineTo(x - rh, ry + rh);
+            }
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
     // PANELS-phase per-cell hover: tint the single grid cell under the cursor (its
     // model rect belongs to the SELECTED/focused panel). Drawn over the panel fill
     // but UNDER the outline + division mullions below, so the grid lines bounding
     // the cell stay crisp. Suppressed in boundaries-only (overview) mode.
-    if (!boundariesOnly && hoveredCell && seg.index === selectedEdge) {
+    // Skip the hover tint when the hovered cell is ALSO selected: the selection fill (drawn
+    // just below) is identical, so painting both would darken the cell — selecting a cell
+    // must not make its blue any heavier than the hover.
+    const hoverIsSelected =
+      !!hoveredCell &&
+      !!selectedCells &&
+      selectedCells.some(
+        (sc) =>
+          sc.edge === seg.index &&
+          Math.abs(sc.x0 - hoveredCell.x0) < 1e-6 &&
+          Math.abs(sc.y0 - hoveredCell.y0) < 1e-6 &&
+          Math.abs(sc.x1 - hoveredCell.x1) < 1e-6 &&
+          Math.abs(sc.y1 - hoveredCell.y1) < 1e-6,
+      );
+    if (!boundariesOnly && hoveredCell && seg.index === selectedEdge && !hoverIsSelected) {
       const c0 = toScreen(vp, { x: hoveredCell.x0, y: hoveredCell.y0 });
       const c1 = toScreen(vp, { x: hoveredCell.x1, y: hoveredCell.y1 });
       ctx.fillStyle = tk.unravelCellHighlightFill;
       ctx.fillRect(Math.min(c0.x, c1.x), Math.min(c0.y, c1.y), Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
+    }
+
+    // CELL SELECTION (Wall Border phase, Type tool): tint every selected cell belonging to
+    // THIS panel with the same blue HIGHLIGHT as the hover (no outline — the fill alone marks
+    // the selection). Project-wide Shift selections list cells across panels, so each is
+    // matched to its owning edge here. Suppressed in boundaries-only overview.
+    if (!boundariesOnly && selectedCells && selectedCells.length > 0) {
+      for (const sc of selectedCells) {
+        if (sc.edge !== seg.index) continue;
+        const c0 = toScreen(vp, { x: sc.x0, y: sc.y0 });
+        const c1 = toScreen(vp, { x: sc.x1, y: sc.y1 });
+        const sx = Math.min(c0.x, c1.x);
+        const sy = Math.min(c0.y, c1.y);
+        const sw = Math.abs(c1.x - c0.x);
+        const sh = Math.abs(c1.y - c0.y);
+        // SHADOWS view is fully monochrome, so the selection drops its blue for neutral grey.
+        ctx.fillStyle = shadows ? tk.frameShadow : tk.unravelCellSelectFill;
+        ctx.fillRect(sx, sy, sw, sh);
+      }
     }
 
     // Outline. Hovered rect uses the highlight colour + thicker stroke; a selected
@@ -1154,12 +1300,16 @@ function drawUnravel(
     // here and reset to solid right after the horizontal dividers, before the framing.
     ctx.setLineDash([9, 4, 1.5, 4]);
 
+    // Centerline stroke colour: neutral grey in the MONOCHROME Shadows view, otherwise the
+    // normal slate cell colour. (Shared by the equal-split, division, and divider lines below.)
+    const centerlineStroke = shadows ? tk.frameMonoFrame : tk.unravelCell;
+
     // Cell splits: N-1 equal-width vertical division lines inside the rectangle.
     // Centerline visibility is controlled ONLY by the Centerlines eye icon
     // (centerlinesHidden) — NO view (Clean / Shadows included) auto-hides them.
     const nCells = Math.max(1, Math.round(cells));
     if (!centerlinesHidden && nCells > 1) {
-      ctx.strokeStyle = tk.unravelCell;
+      ctx.strokeStyle = centerlineStroke;
       ctx.lineWidth = tk.segmentW;
       for (let k = 1; k < nCells; k++) {
         const mx = seg.x0 + (seg.x1 - seg.x0) * (k / nCells);
@@ -1175,7 +1325,7 @@ function drawUnravel(
     // User-placed division lines (Centerlines tool): dashed centerlines at each stored
     // OFFSET from the panel's left edge, baseline → top. Drawn in the cell colour.
     if (!centerlinesHidden && divisions && divisions.length > 0) {
-      ctx.strokeStyle = tk.unravelCell;
+      ctx.strokeStyle = centerlineStroke;
       ctx.lineWidth = tk.segmentW;
       for (const off of divisions) {
         const mx = seg.x0 + off;
@@ -1192,7 +1342,7 @@ function drawUnravel(
     // each stored OFFSET from the panel's baseline (y = 0), spanning x0 → x1. Same cell
     // colour/width as the vertical divisions, just rotated 90°.
     if (!centerlinesHidden && dividersH && dividersH.length > 0) {
-      ctx.strokeStyle = tk.unravelCell;
+      ctx.strokeStyle = centerlineStroke;
       ctx.lineWidth = tk.segmentW;
       for (const off of dividersH) {
         if (off <= 0 || off >= h) continue; // outside the panel body
@@ -1293,10 +1443,19 @@ function drawUnravel(
         // hulls as a SINGLE path in ONE fill call. Filling once (nonzero winding) paints
         // each covered pixel exactly once, so overlapping shadows read as one flat tone —
         // no darker compounded sections. (No blur — hard, crisp edges.)
+        // OPAQUE cells sit FLUSH with the frame, so no shadow falls on them: punch their
+        // infill rects out of the clip region (even-odd → the panel rect minus those holes).
         ctx.save();
         ctx.beginPath();
         ctx.rect(x, y, w, rectH);
-        ctx.clip();
+        if (opaqueCells && opaqueCells.length > 0) {
+          for (const oc of opaqueCells) {
+            const a = toScreen(vp, { x: oc.x0, y: oc.y0 });
+            const b = toScreen(vp, { x: oc.x1, y: oc.y1 });
+            ctx.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+          }
+        }
+        ctx.clip("evenodd");
         ctx.fillStyle = tk.frameShadow;
         ctx.beginPath();
         for (const b of bars) addHull(b);

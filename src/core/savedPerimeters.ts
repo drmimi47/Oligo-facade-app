@@ -44,6 +44,11 @@ export interface CellInsets {
 /** Curtain-wall fabrication system assignable to a panel (Stick vs Unitized). */
 export type CwType = "stick" | "unitized";
 
+/** Glazing/infill TYPE assignable to a single grid CELL via the Type tool: clear
+ *  Vision glass, opaque Spandrel glass, or a fully Opaque (non-glass) infill. Each
+ *  renders with its own hatch so the elevation reads as a typed facade. */
+export type CellType = "vision" | "spandrel" | "opaque";
+
 export interface SavedElevationState {
   /** Per-edge-index height overrides (model units). */
   unravelHeights: Record<number, number>;
@@ -67,6 +72,10 @@ export interface SavedElevationState {
    *  four edges (model feet). Set by the Framing tool under the Unitized CW system.
    *  Absent/empty = no per-cell framing. */
   panelCellFraming: Record<number, Record<number, CellInsets>>;
+  /** Per-edge-index UNITIZED cell TYPE: cell index (in that panel's cell grid, the same
+   *  order as the editor's cellsForEdge) → its glazing type (Vision / Spandrel / Opaque),
+   *  assigned by the Type tool. Absent/empty = no type assigned (untyped Vision default). */
+  panelCellTypes: Record<number, Record<number, CellType>>;
   /** Per-edge-index assigned curtain-wall system (Stick / Unitized). A panel carries at
    *  most one system; absent = none chosen yet. */
   panelCwType: Record<number, CwType>;
@@ -138,6 +147,9 @@ export interface SavedPerimeter {
   /** Per-edge UNITIZED per-cell framing insets (Framing tool, Unitized system).
    *  OPTIONAL so older entries still load (defaulted to {} on load). */
   panelCellFraming?: Record<number, Record<number, CellInsets>>;
+  /** Per-edge UNITIZED per-cell glazing TYPE (Vision / Spandrel / Opaque, Type tool).
+   *  OPTIONAL so older entries still load (defaulted to {} on load). */
+  panelCellTypes?: Record<number, Record<number, CellType>>;
   /** Per-edge curtain-wall system assignment (Stick / Unitized). OPTIONAL so older
    *  entries still load (defaulted to {} on load). */
   panelCwType?: Record<number, CwType>;
@@ -180,6 +192,19 @@ export function cloneCellFraming(
   );
 }
 
+/**
+ * Deep-copy the nested per-cell TYPE map (panel index → cell index → cell type) so a
+ * stored snapshot is fully detached from live state. Two object levels of primitive
+ * (string) values — mirrors {@link cloneCellFraming}.
+ */
+export function cloneCellTypes(
+  m: Record<number, Record<number, CellType>>,
+): Record<number, Record<number, CellType>> {
+  return Object.fromEntries(
+    Object.entries(m).map(([k, cells]) => [k, { ...cells }]),
+  );
+}
+
 /** Minimum vertices required to save (guards empty/degenerate perimeters). */
 export const MIN_SAVE_VERTICES = 2;
 
@@ -216,6 +241,8 @@ export function cloneElevationState(e: SavedElevationState): SavedElevationState
     panelMullionsH: { ...e.panelMullionsH },
     // Unitized per-cell framing is a nested map — deep-copy both object levels.
     panelCellFraming: cloneCellFraming(e.panelCellFraming),
+    // Unitized per-cell TYPE is a nested map — deep-copy both object levels.
+    panelCellTypes: cloneCellTypes(e.panelCellTypes),
     // Per-panel system assignment is a flat map — a fresh container is a sufficient copy.
     panelCwType: { ...e.panelCwType },
     unravelHeight: e.unravelHeight,
@@ -262,6 +289,7 @@ export function makeSavedPerimeter(
     panelMullionsV: elev.panelMullionsV,
     panelMullionsH: elev.panelMullionsH,
     panelCellFraming: elev.panelCellFraming,
+    panelCellTypes: elev.panelCellTypes,
     panelCwType: elev.panelCwType,
     unravelHeight: elev.unravelHeight,
     floorPlates: elev.floorPlates,
@@ -333,6 +361,7 @@ export function loadSaved(): SavedPerimeter[] {
         panelMullionsV: s.panelMullionsV ?? {},
         panelMullionsH: s.panelMullionsH ?? {},
         panelCellFraming: s.panelCellFraming ?? {},
+        panelCellTypes: s.panelCellTypes ?? {},
         panelCwType: s.panelCwType ?? {},
         unravelHeight: s.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT,
         floorPlates: s.floorPlates ?? [],

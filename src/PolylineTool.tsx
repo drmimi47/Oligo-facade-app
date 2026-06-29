@@ -66,6 +66,7 @@ import {
   emptyLocation,
   cloneLocation,
   cloneCellFraming,
+  cloneCellTypes,
   type SavedPerimeter,
   type SavedElevationState,
   type LocationInfo,
@@ -108,6 +109,30 @@ type CwType = "stick" | "unitized";
 const CW_TYPE_LABELS: Record<CwType, string> = {
   stick: "Stick System",
   unitized: "Unitized System",
+};
+
+/** Glazing/infill TYPES selectable from the "Type" button's submenu, with the labels
+ *  shown to the user. Assigned per grid CELL (Cells tab) and rendered with a per-type
+ *  hatch. The order here is the order the submenu lists them. */
+type CellType = "vision" | "spandrel" | "opaque";
+const CELL_TYPE_LABELS: Record<CellType, string> = {
+  vision: "Vision",
+  spandrel: "Spandrel",
+  opaque: "Opaque",
+};
+
+/**
+ * Representative VISIBLE LIGHT TRANSMITTANCE (VLT / NFRC visible transmittance, 0–1) per
+ * cell type — industry-typical defaults, used by the VLT statistics view. Vision = a clear /
+ * low-E vision IGU (~0.70 VT, the see-through glazing that admits daylight); Spandrel
+ * (back-painted / opacified glass that conceals the slab edge) and Opaque (solid infill —
+ * metal panel, masonry, etc.) transmit no visible light, so 0. Adjust here to match a
+ * specific product's spec sheet — these are the single source of truth for the VLT readout.
+ */
+const CELL_TYPE_VLT: Record<CellType, number> = {
+  vision: 0.7,
+  spandrel: 0,
+  opaque: 0,
 };
 
 /**
@@ -246,6 +271,9 @@ interface DocSnapshot {
   /** Per-edge UNITIZED per-cell framing insets (Framing tool, Unitized system).
    *  panel edge → cell index → the four edge insets. Replaced, never mutated. */
   panelCellFraming: Record<number, Record<number, CellInsets>>;
+  /** Per-edge UNITIZED per-cell glazing TYPE (Type tool): panel edge → cell index →
+   *  Vision / Spandrel / Opaque. Replaced, never mutated. */
+  panelCellTypes: Record<number, Record<number, CellType>>;
   /** Per-edge assigned curtain-wall system (Stick / Unitized). Replaced, never mutated. */
   panelCwType: Record<number, CwType>;
   unravelHeight: number;
@@ -482,12 +510,17 @@ export default function PolylineTool() {
   // MULLIONS tool armed? Only available once a CW Type is chosen. Mutually exclusive
   // with the rest of the bottom-left cluster.
   const [mullionsOn, setMullionsOn] = useState(false);
-  // TYPE tool armed? A SCAFFOLDED cluster tool (no canvas behaviour yet — see the
-  // "scaffold only" decision): it turns blue when armed and is mutually exclusive with
-  // the rest of the cluster, becoming available only once the focused panel carries at
-  // least one frame. Its eye icon toggles `typeVisible` (a wired no-op for now, to drive
-  // visibility once the feature renders something).
+  // TYPE submenu open? The "Type" button opens a small Vision / Spandrel / Opaque chooser
+  // (drop-up, same rules as the CW Type menu): the button turns blue while it's open and is
+  // mutually exclusive with the rest of the bottom-left cluster (arming any other tool, or a
+  // canvas press, closes it). Picking an option assigns the glazing type to the SELECTED cells
+  // (Wall Border phase; see selectedCells). Reusing this single flag keeps the cluster mutual-exclusion
+  // plumbing (disarmClusterTools / Esc / gate-loss) working unchanged.
   const [typeOn, setTypeOn] = useState(false);
+  // Visibility of the per-cell TYPE hatches on the canvas (the Type button's eye icon). A
+  // view preference (not model data), like the framing / centerline visibility flags. The
+  // eye is gated on `hasAnyCellType` (NOT the Type button's `canType`), so it stays usable
+  // for showing/hiding hatches whenever any wall border carries a type, selection or not.
   const [typeVisible, setTypeVisible] = useState(true);
   // RENDER / CONSTRAINT — two SCAFFOLDED top-row buttons (no behaviour yet) that sit
   // just left of the Projects minimap, in line with the top-left undo/redo cluster.
@@ -519,6 +552,12 @@ export default function PolylineTool() {
   // panel), framing here is per-cell, per-edge. Reset for a panel when its centerlines
   // change (clearPanelMullion), so new cells always start un-framed.
   const [panelCellFraming, setPanelCellFraming] = useState<Record<number, Record<number, CellInsets>>>({});
+  // UNITIZED per-cell TYPE (Type tool): panel edge → cell index (in cellsForEdge order) →
+  // the cell's glazing type (Vision / Spandrel / Opaque). Assigned in the Wall Border phase:
+  // the user SELECTS cells (click = one, Shift+click = the whole Material-ID family) and then
+  // picks a type, which applies to the selection. Drives the per-cell hatch overlay. Absent =
+  // untyped (drawn with no hatch). Visibility follows `typeVisible`.
+  const [panelCellTypes, setPanelCellTypes] = useState<Record<number, Record<number, CellType>>>({});
   // Mullions-tool hover: which axis's grid lines are under the cursor on the focused
   // panel ("v"/"h"), or null. Highlights the whole set (they adjust together).
   const [mullionHover, setMullionHover] = useState<"v" | "h" | null>(null);
@@ -548,6 +587,15 @@ export default function PolylineTool() {
   // Esc backs out one layer at a time (cell → panel → strip), so this is the deepest
   // navigation level. Always cleared whenever focusedPanel is cleared / view changes.
   const [focusedCell, setFocusedCell] = useState<{ edge: number; x0: number; x1: number; y0: number; y1: number } | null>(null);
+  // WALL BORDER (panels) phase: the set of grid cells the user has SELECTED for glazing-
+  // type assignment, each by its model-space rectangle bounds + owning edge. A plain
+  // left-click on a cell selects just that one (replaces the set); Shift+click selects
+  // every cell sharing that cell's Material ID project-wide. The Type button is enabled
+  // only while this is non-empty, and selectCellType applies the chosen type to all of
+  // them. Transient UI (NOT persisted): cleared on panel switch / view toggle / grid edit.
+  const [selectedCells, setSelectedCells] = useState<
+    Array<{ edge: number; x0: number; x1: number; y0: number; y1: number }>
+  >([]);
   // PANELS phase only: index (into cellsForEdge(focusedPanel)) of the grid cell the
   // cursor is hovering, or -1 for none. Drives a per-cell highlight so a zoomed-in,
   // subdivided panel visibly reads as a set of individually navigable cells. Stored
@@ -655,9 +703,12 @@ export default function PolylineTool() {
   // "none" = hidden; "general" = the general stats overlay; "irradiance" = the
   // Irradiance (W/m²) diagram (a Ladybug-style month×hour solar heatmap on the selected
   // wall border); "insolation" = its energy companion, the monthly Insolation (kWh/m²)
-  // bar chart for the same wall. statsMenuOpen controls the selector dropdown (None /
-  // General / Irradiance / Insolation options).
-  const [statsMode, setStatsMode] = useState<"none" | "general" | "irradiance" | "insolation">("none");
+  // bar chart for the same wall; "wwr" = the Window-to-Wall Ratio readout for the selected
+  // wall border (Gross Opening + Net Glazing methods, from the per-cell glazing types).
+  // "vlt" = the Visible Light Transmittance readout for the selected wall border (per-type
+  // industry VLT values + the wall's effective VLT). statsMenuOpen controls the selector
+  // dropdown (None / General / Irradiance / Insolation / WWR / VLT).
+  const [statsMode, setStatsMode] = useState<"none" | "general" | "irradiance" | "insolation" | "wwr" | "vlt">("none");
   const [statsMenuOpen, setStatsMenuOpen] = useState(false);
   // The statistics selection is SHARED across views, but only for stats that exist on
   // BOTH sides. "General" reads in the Building Perimeter and the unravel/elevation
@@ -668,7 +719,10 @@ export default function PolylineTool() {
   // elevations; this derived value drives the button label, the menu active-state, and
   // the overlay render conditions so all three agree per view.
   const effectiveStatsMode =
-    !unravelOn && (statsMode === "irradiance" || statsMode === "insolation") ? "none" : statsMode;
+    !unravelOn &&
+    (statsMode === "irradiance" || statsMode === "insolation" || statsMode === "wwr" || statsMode === "vlt")
+      ? "none"
+      : statsMode;
 
   // --- TRANSIENT INTERACTION STATE ---
   const [cursorModel, setCursorModel] = useState<Point | null>(null);
@@ -764,8 +818,8 @@ export default function PolylineTool() {
   const [redoStack, setRedoStack] = useState<HistoryEntry[]>([]);
   // Always-current document snapshot, refreshed every render, so the capture and
   // undo/redo helpers read fresh values without stale-closure bugs.
-  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates });
-  docRef.current = { perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates };
+  const docRef = useRef<DocSnapshot>({ perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCellTypes, panelCwType, unravelHeight, floorPlates });
+  docRef.current = { perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCellTypes, panelCwType, unravelHeight, floorPlates };
   // Pre-interaction snapshot for a drag / field edit, pushed on the FIRST actual
   // change (so a no-op press/focus never creates an empty undo step).
   const pendingRef = useRef<DocSnapshot | null>(null);
@@ -803,6 +857,7 @@ export default function PolylineTool() {
     setPanelMullionsV(d.panelMullionsV);
     setPanelMullionsH(d.panelMullionsH);
     setPanelCellFraming(d.panelCellFraming);
+    setPanelCellTypes(d.panelCellTypes);
     setPanelCwType(d.panelCwType);
     setUnravelHeight(d.unravelHeight);
     setFloorPlates(d.floorPlates);
@@ -1210,6 +1265,125 @@ export default function PolylineTool() {
   );
 
   /**
+   * GLASS-INFILL rect of one grid cell: the cell rectangle MINUS its extruded frame
+   * members, the SINGLE source of truth for "what is glass vs. frame" (used by both the
+   * Type hatch and the WWR statistics). Frames live on INTERIOR grid lines only, and a
+   * panel is either Stick (mullion bands straddling each interior line — a cell edge on an
+   * interior line loses the mullion half-width `mv`/`mh`; panel-border edges keep their
+   * glass) or Unitized (per-cell `panelCellFraming` insets), never both. `cellIndex` keys
+   * the Unitized inset lookup (cellsForEdge order). Returns the inset rect; callers guard
+   * the degenerate (fully-framed) case where x1≤x0 or y1≤y0.
+   */
+  const cellGlassRect = useCallback(
+    (edge: number, cell: { x0: number; x1: number; y0: number; y1: number }, cellIndex: number) => {
+      let gx0 = cell.x0, gx1 = cell.x1, gy0 = cell.y0, gy1 = cell.y1;
+      const fr = panelCellFraming[edge]?.[cellIndex];
+      if (fr) {
+        gx0 += Math.max(0, fr.left);
+        gx1 -= Math.max(0, fr.right);
+        gy0 += Math.max(0, fr.bottom);
+        gy1 -= Math.max(0, fr.top);
+      } else {
+        const mv = panelMullionsV[edge] ?? 0;
+        const mh = panelMullionsH[edge] ?? 0;
+        const seg = unravelResult?.segments.find((s) => s.index === edge);
+        const lo = seg ? Math.min(seg.x0, seg.x1) : cell.x0;
+        const hi = seg ? Math.max(seg.x0, seg.x1) : cell.x1;
+        const ph = effectiveHeight(edge);
+        if (mv > 0) {
+          if (Math.abs(cell.x0 - lo) > 1e-6) gx0 += mv;
+          if (Math.abs(cell.x1 - hi) > 1e-6) gx1 -= mv;
+        }
+        if (mh > 0) {
+          if (cell.y0 > 1e-6) gy0 += mh;
+          if (Math.abs(cell.y1 - ph) > 1e-6) gy1 -= mh;
+        }
+      }
+      return { x0: gx0, x1: gx1, y0: gy0, y1: gy1 };
+    },
+    [panelCellFraming, panelMullionsV, panelMullionsH, unravelResult, effectiveHeight],
+  );
+
+  /**
+   * WINDOW-TO-WALL RATIO for one panel, both industry methods. The WALL is the whole panel
+   * rect (width × height); the WINDOW is its VISION cells (Spandrel + Opaque + untyped read
+   * as wall, not window). Two ways, per the WWR stats view:
+   *  • Gross Opening — frames/mullions counted as window: Σ vision cells' FULL cell area.
+   *  • Net Glazing — frames/mullions excluded: Σ vision cells' GLASS-INFILL area.
+   * Ratios are window/wall (0 when the panel has no area). Cells use the live grid order so
+   * the Unitized framing/type lookups stay aligned with cellsForEdge.
+   */
+  const panelWWR = useCallback(
+    (edge: number) => {
+      const seg = unravelResult?.segments.find((s) => s.index === edge);
+      const width = seg ? Math.abs(seg.x1 - seg.x0) : 0;
+      const wallArea = width * effectiveHeight(edge);
+      const types = panelCellTypes[edge] ?? {};
+      const cells = cellsForEdge(edge);
+      let windowGross = 0;
+      let windowNet = 0;
+      let visionCount = 0;
+      let typedCount = 0; // cells with ANY type assigned (coverage for the provisional flag)
+      cells.forEach((c, i) => {
+        if (types[i]) typedCount++;
+        if (types[i] !== "vision") return;
+        visionCount++;
+        windowGross += Math.abs(c.x1 - c.x0) * Math.abs(c.y1 - c.y0);
+        const g = cellGlassRect(edge, c, i);
+        if (g.x1 > g.x0 && g.y1 > g.y0) windowNet += (g.x1 - g.x0) * (g.y1 - g.y0);
+      });
+      return {
+        wallArea,
+        windowGross,
+        windowNet,
+        wwrGross: wallArea > 0 ? windowGross / wallArea : 0,
+        wwrNet: wallArea > 0 ? windowNet / wallArea : 0,
+        visionCount,
+        typedCount,
+        cellCount: cells.length,
+      };
+    },
+    [unravelResult, effectiveHeight, panelCellTypes, cellsForEdge, cellGlassRect],
+  );
+
+  /**
+   * VISIBLE LIGHT TRANSMITTANCE for one panel. Each cell type carries an industry-standard
+   * VLT (CELL_TYPE_VLT: Vision ≈ 0.70, Spandrel/Opaque = 0 — no visible transmittance). The
+   * EFFECTIVE APERTURE is the glass-area-weighted VLT spread over the whole panel rect (=
+   * net WWR × glazing VLT), the standard daylighting metric — light passes only through the
+   * actual glass infill, so frames/mullions and non-Vision cells contribute nothing.
+   */
+  const panelVLT = useCallback(
+    (edge: number) => {
+      const seg = unravelResult?.segments.find((s) => s.index === edge);
+      const width = seg ? Math.abs(seg.x1 - seg.x0) : 0;
+      const wallArea = width * effectiveHeight(edge);
+      const types = panelCellTypes[edge] ?? {};
+      const cells = cellsForEdge(edge);
+      let weighted = 0; // Σ glass-area × type VLT (the light-transmitting area)
+      let typedCount = 0; // cells with ANY type assigned (coverage for the provisional flag)
+      cells.forEach((c, i) => {
+        const t = types[i];
+        if (!t) return;
+        typedCount++;
+        const g = cellGlassRect(edge, c, i);
+        if (g.x1 <= g.x0 || g.y1 <= g.y0) return;
+        weighted += (g.x1 - g.x0) * (g.y1 - g.y0) * CELL_TYPE_VLT[t];
+      });
+      return {
+        wallArea,
+        visionVLT: CELL_TYPE_VLT.vision,
+        spandrelVLT: CELL_TYPE_VLT.spandrel,
+        opaqueVLT: CELL_TYPE_VLT.opaque,
+        effectiveAperture: wallArea > 0 ? weighted / wallArea : 0,
+        typedCount,
+        cellCount: cells.length,
+      };
+    },
+    [unravelResult, effectiveHeight, panelCellTypes, cellsForEdge, cellGlassRect],
+  );
+
+  /**
    * The SOLAR settings governing the LIVE drawing: the active saved entry's stored
    * settings (edited in its Solar Study popup), or fresh defaults for a brand-new
    * unsaved shape. Only `northOffset` matters for the Orientation Heatmap — it is the
@@ -1344,6 +1518,13 @@ export default function PolylineTool() {
     return unravelDraws.map((d) => {
       const edge = d.seg.index;
       const store = panelCellFraming[edge];
+      // Per-cell TYPE assignments for this panel (only drawn when the Type eye is on).
+      const typeStore = typeVisible ? panelCellTypes[edge] : undefined;
+      const hasTypes = !!typeStore && Object.keys(typeStore).length > 0;
+      // OPAQUE cells drive the Shadows-view "flush, no cast shadow" exclusion — a property of
+      // the assigned TYPE, so read from the raw type map (NOT typeStore, which the eye gates).
+      const rawTypes = panelCellTypes[edge];
+      const hasOpaque = !!rawTypes && Object.values(rawTypes).some((t) => t === "opaque");
       const isDraftPanel = cellFrameDraft?.edge === edge;
       // Hover highlight only on the focused panel while the Framing tool is armed under
       // the Unitized system, and only in the Panels tab (not the deeper Assembly zoom).
@@ -1354,7 +1535,7 @@ export default function PolylineTool() {
       const colorView = cellViewMode === "materialId";
       const orientView = cellViewMode === "orientation";
       // A draft can touch ANY panel (mirroring), so never early-out while one is live.
-      if (!store && !cellFrameDraft && !(isHoverPanel && cellEdgeHover) && !colorView && !orientView)
+      if (!store && !hasTypes && !hasOpaque && !cellFrameDraft && !(isHoverPanel && cellEdgeHover) && !colorView && !orientView)
         return d;
       const cells = cellsForEdge(edge);
       const framing: NonNullable<UnravelDraw["cellFraming"]> = [];
@@ -1424,17 +1605,52 @@ export default function PolylineTool() {
               sun: sunHit,
             }))
           : undefined;
+      // PER-CELL TYPE hatch: one entry per typed cell carrying its glazing type and the
+      // GLASS-INFILL rect to hatch — the cell MINUS the extruded frame members (via the
+      // shared cellGlassRect), so the hatch never paints over framing (the frame is the
+      // non-Vision/Spandrel/Opaque area, drawn white in Shadows view). Drawn in every view
+      // (facade spec, not a view mode) when the Type eye is on.
+      const cellTypes: NonNullable<UnravelDraw["cellTypes"]> | undefined = hasTypes
+        ? cells
+            .map((c, i) => {
+              const type = typeStore![i];
+              if (!type) return null;
+              const g = cellGlassRect(edge, c, i);
+              // Frame consumes the whole cell → no glass to hatch.
+              if (g.x1 - g.x0 <= 1e-6 || g.y1 - g.y0 <= 1e-6) return null;
+              return { x0: g.x0, x1: g.x1, y0: g.y0, y1: g.y1, type };
+            })
+            .filter((e): e is NonNullable<typeof e> => e !== null)
+        : undefined;
+      // OPAQUE-cell shadow exclusion (Shadows view): the glass-infill rect of each opaque
+      // cell, so the renderer can punch them out of the cast-shadow clip (opaque sits flush
+      // with the frame → no shadow). Built from the raw type map so it ignores the eye toggle.
+      const opaqueCells: NonNullable<UnravelDraw["opaqueCells"]> | undefined = hasOpaque
+        ? cells
+            .map((c, i) => {
+              if (rawTypes![i] !== "opaque") return null;
+              const g = cellGlassRect(edge, c, i);
+              if (g.x1 - g.x0 <= 1e-6 || g.y1 - g.y0 <= 1e-6) return null;
+              return { x0: g.x0, x1: g.x1, y0: g.y0, y1: g.y1 };
+            })
+            .filter((e): e is NonNullable<typeof e> => e !== null)
+        : undefined;
       return {
         ...d,
         cellFraming: framing.length ? framing : undefined,
         frameHover,
         cellColors,
         cellOrient,
+        cellTypes,
+        opaqueCells,
       };
     });
   }, [
     unravelDraws,
     panelCellFraming,
+    panelCellTypes,
+    cellGlassRect,
+    typeVisible,
     cellFrameDraft,
     cellEdgeHover,
     mullionsOn,
@@ -1711,15 +1927,15 @@ export default function PolylineTool() {
     });
   }, [cwType, closeAllMenus]);
 
-  // TYPE: a SCAFFOLDED cluster tool (no canvas behaviour yet). Becomes available only
-  // once the focused panel carries at least one frame (gated by `canType` in the UI).
-  // Mutually exclusive with every other cluster tool — arming it disarms the rest and
-  // drops their in-flight previews — and turns blue while armed like the others. The
-  // actual "type" assignment/render is an intentional TODO stub.
+  // TYPE: opens the Vision / Spandrel / Opaque chooser submenu (drop-up, same rules as the
+  // CW Type menu). Gated by `canType` in the UI (the focused panel has cells to type).
+  // Toggling it open closes every other menu and disarms every cluster tool (mutual
+  // exclusion), turning the button blue while open. Picking an option (selectCellType)
+  // does the actual assignment — restricted to the Cells tab.
   const onType = useCallback(() => {
-    if (focusedPanel === null) return; // disabled in the UI, but guard anyway
-    // Restore visibility on click so an armed tool's elements are always shown (mirrors
-    // the Floor Lines button).
+    if (!unravelOn || focusedPanel === null) return; // disabled in the UI, but guard anyway
+    // Restore hatch visibility on open so the assignment the user is about to make is shown
+    // (mirrors the Floor Lines / Framing buttons restoring their elements' visibility).
     setTypeVisible(true);
     closeAllMenus();
     setFloorPlateMode(false);
@@ -1734,7 +1950,103 @@ export default function PolylineTool() {
     setCellEdgeHover(null);
     setCellFrameDraft(null);
     setTypeOn((on) => !on);
-  }, [focusedPanel, closeAllMenus]);
+  }, [unravelOn, focusedPanel, closeAllMenus]);
+
+  /**
+   * SELECT the grid cell at model rect `cell` (owned by `edge`) for type assignment.
+   * A plain click (`sameId` false) TOGGLES just that one cell: clicking an unselected
+   * cell selects only it (replacing the current selection); re-clicking a cell that is
+   * already selected removes it (deselect). Shift+click (`sameId` true) selects EVERY
+   * cell sharing this cell's Material ID (geometric shape) across the whole project, so
+   * a bulk family can be typed at once. Wall Border (panels) phase only; gated by the
+   * click handler.
+   */
+  const selectCellAt = useCallback(
+    (edge: number, cell: { x0: number; x1: number; y0: number; y1: number }, sameId: boolean) => {
+      if (sameId) {
+        // Shift: every cell of this Material ID (shape), project-wide — walk each panel's
+        // grid (mirrors the Framing tool's Material-ID mirroring).
+        const key = cellShapeColors.keyOf(cell);
+        const out: Array<{ edge: number; x0: number; x1: number; y0: number; y1: number }> = [];
+        for (const seg of unravelResult?.segments ?? []) {
+          for (const c of cellsForEdge(seg.index)) {
+            if (cellShapeColors.keyOf(c) === key)
+              out.push({ edge: seg.index, x0: c.x0, x1: c.x1, y0: c.y0, y1: c.y1 });
+          }
+        }
+        setSelectedCells(out);
+        return;
+      }
+      // Plain click: TOGGLE this single cell. Already selected → deselect it; otherwise
+      // select only it (replacing whatever was selected).
+      setSelectedCells((prev) => {
+        const isSel = prev.some(
+          (sc) =>
+            sc.edge === edge &&
+            Math.abs(sc.x0 - cell.x0) < 1e-6 &&
+            Math.abs(sc.y0 - cell.y0) < 1e-6 &&
+            Math.abs(sc.x1 - cell.x1) < 1e-6 &&
+            Math.abs(sc.y1 - cell.y1) < 1e-6,
+        );
+        if (isSel)
+          return prev.filter(
+            (sc) =>
+              !(
+                sc.edge === edge &&
+                Math.abs(sc.x0 - cell.x0) < 1e-6 &&
+                Math.abs(sc.y0 - cell.y0) < 1e-6 &&
+                Math.abs(sc.x1 - cell.x1) < 1e-6 &&
+                Math.abs(sc.y1 - cell.y1) < 1e-6
+              ),
+          );
+        return [{ edge, x0: cell.x0, x1: cell.x1, y0: cell.y0, y1: cell.y1 }];
+      });
+    },
+    [cellShapeColors, unravelResult, cellsForEdge],
+  );
+
+  /**
+   * Assign glazing TYPE `t` to EVERY currently-SELECTED cell — or CLEAR the type when
+   * `t` is "none" (un-assigns, dropping the cell back to untyped / no hatch). The
+   * selection already encodes scope (a single click selects one cell, Shift+click the
+   * whole Material-ID family), so this just maps each selected rect back to its panel
+   * grid index and sets / deletes the type. No-op with an empty selection (the Type
+   * button gates this); one undoable step. Closes the submenu after.
+   */
+  const selectCellType = useCallback(
+    (t: CellType | "none") => {
+      setTypeOn(false);
+      if (selectedCells.length === 0) return; // requires a selection (button gates this too)
+      recordHistory();
+      setPanelCellTypes((prev) => {
+        const next = { ...prev };
+        for (const sc of selectedCells) {
+          const cells = cellsForEdge(sc.edge);
+          const idx = cells.findIndex(
+            (c) =>
+              Math.abs(c.x0 - sc.x0) < 1e-6 &&
+              Math.abs(c.y0 - sc.y0) < 1e-6 &&
+              Math.abs(c.x1 - sc.x1) < 1e-6 &&
+              Math.abs(c.y1 - sc.y1) < 1e-6,
+          );
+          if (idx < 0) continue; // stale rect (grid changed) — skip silently
+          if (t === "none") {
+            // Clear: drop this cell's entry (and the whole panel map if it empties out).
+            if (next[sc.edge]) {
+              const panel = { ...next[sc.edge] };
+              delete panel[idx];
+              if (Object.keys(panel).length === 0) delete next[sc.edge];
+              else next[sc.edge] = panel;
+            }
+          } else {
+            next[sc.edge] = { ...(next[sc.edge] ?? {}), [idx]: t };
+          }
+        }
+        return next;
+      });
+    },
+    [selectedCells, cellsForEdge, recordHistory],
+  );
 
   /** Interior GRID-LINE positions of a panel (the lines the Mullions tool targets):
    *  vertical = equal-cell splits + Subtractive divisions (model x); horizontal =
@@ -2140,6 +2452,14 @@ export default function PolylineTool() {
       delete next[edge];
       return next;
     });
+    // Per-cell TYPE assignments are keyed by cell index too, so they go stale the same
+    // way when the grid changes — drop this panel's types alongside its framing.
+    setPanelCellTypes((prev) => {
+      if (prev[edge] === undefined) return prev;
+      const next = { ...prev };
+      delete next[edge];
+      return next;
+    });
   }, []);
 
   /** Commit all lines collected during an erase drag stroke as a single undoable
@@ -2284,10 +2604,11 @@ export default function PolylineTool() {
       // so it doesn't fight their input.
       cancelAnim();
 
-      // Any press on the canvas dismisses an open Statistics / CW Type / View menu.
+      // Any press on the canvas dismisses an open Statistics / CW Type / View / Type menu.
       if (statsMenuOpen) setStatsMenuOpen(false);
       if (cwMenuOpen) setCwMenuOpen(false);
       if (viewMenuOpen) setViewMenuOpen(false);
+      if (typeOn) setTypeOn(false);
 
       // FLOOR PLATE tool: while armed, a left-click drops a horizontal level line
       // at the cursor's elevation (or removes one already there). Takes precedence
@@ -2510,6 +2831,18 @@ export default function PolylineTool() {
           }
           return;
         }
+        // WALL BORDER (panels) phase — CELL SELECTION for type assignment. A click on a
+        // cell of the FOCUSED panel selects it (Shift = the whole Material-ID family,
+        // project-wide) instead of drilling into the Assembly cell zoom. NOT subject to the
+        // drill cooldown so rapid multi-select clicks all register. A click on a DIFFERENT
+        // panel falls through to the layer-switch logic below (which clears the selection).
+        if (focusedPanel !== null && focusedCell === null && hitUnravelPanel(mu) === focusedPanel) {
+          const target = cellsForEdge(focusedPanel).find(
+            (c) => mu.x >= c.x0 && mu.x <= c.x1 && mu.y >= c.y0 && mu.y <= c.y1,
+          );
+          if (target) selectCellAt(focusedPanel, target, e.shiftKey);
+          return; // consumed: selection (or a no-op click inside the panel) — keep focus
+        }
         // Click landed ON a panel/cell -> drill one layer deeper, OR sideways. Debounced
         // so a habitual double-click advances only one layer (see DRILL_COOLDOWN_MS).
         // While already focused on a panel (Panels/Assembly), clicking a DIFFERENT panel
@@ -2541,18 +2874,22 @@ export default function PolylineTool() {
           if (clickedEdge >= 0 && clickedEdge !== focusedPanel) {
             lastDrillRef.current = now;
             zoomToPanel(clickedEdge);
-          } else {
-            const cells = cellsForEdge(focusedPanel);
-            if (cells.length > 1) {
-              const target = cells.find(
-                (c) => mu.x >= c.x0 && mu.x <= c.x1 && mu.y >= c.y0 && mu.y <= c.y1,
-              );
-              if (target) {
-                lastDrillRef.current = now;
-                zoomToCell({ edge: focusedPanel, ...target });
-              }
-            }
           }
+          // NOTE: same-panel clicks are handled above as CELL SELECTION (the Wall Border
+          // selection block returns before reaching here), so the click-to-zoom-into-a-cell
+          // drill is disabled for now. Kept (commented) because we will re-use it later.
+          // else {
+          //   const cells = cellsForEdge(focusedPanel);
+          //   if (cells.length > 1) {
+          //     const target = cells.find(
+          //       (c) => mu.x >= c.x0 && mu.x <= c.x1 && mu.y >= c.y0 && mu.y <= c.y1,
+          //     );
+          //     if (target) {
+          //       lastDrillRef.current = now;
+          //       zoomToCell({ edge: focusedPanel, ...target });
+          //     }
+          //   }
+          // }
         } else {
           // ELEVATIONS: enter the Panels layer for the clicked panel.
           const edge = hitUnravelPanel(mu);
@@ -2681,6 +3018,7 @@ export default function PolylineTool() {
       statsMenuOpen,
       cwMenuOpen,
       viewMenuOpen,
+      typeOn,
       recordHistory,
       beginHistory,
       // Subtractive division tool reads these; without them the handler would keep
@@ -2726,6 +3064,9 @@ export default function PolylineTool() {
       cellsForEdge,
       zoomToCell,
       zoomToPanel,
+      // Wall Border cell SELECTION: a same-panel click selects the cell (Shift = the
+      // Material-ID family) via selectCellAt; a stale closure would mis-target the set.
+      selectCellAt,
       fitUnravel,
       unravelGap,
       unravelHeights,
@@ -3306,8 +3647,8 @@ export default function PolylineTool() {
    * auto-save effect below has a stable, value-equal dependency to compare.
    */
   const currentElevation: SavedElevationState = useMemo(
-    () => ({ unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates }),
-    [unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates],
+    () => ({ unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCellTypes, panelCwType, unravelHeight, floorPlates }),
+    [unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCellTypes, panelCwType, unravelHeight, floorPlates],
   );
 
   /**
@@ -3329,6 +3670,7 @@ export default function PolylineTool() {
     setPanelMullionsV({});
     setPanelMullionsH({});
     setPanelCellFraming({});
+    setPanelCellTypes({});
     setPanelCwType({});
     setUnravelHeight(DEFAULT_WALL_HEIGHT_FT);
     setFloorPlates([]);
@@ -3357,6 +3699,7 @@ export default function PolylineTool() {
     setCellEdgeHover(null);
     setCellFrameDraft(null);
     setTypeOn(false);
+    setTypeVisible(true);
     setFloorPlateMode(false);
     setFloorLinesVisible(true);
     setCwMenuOpen(false);
@@ -3414,6 +3757,8 @@ export default function PolylineTool() {
       setPanelMullionsH({ ...(s.panelMullionsH ?? {}) });
       // Unitized per-cell framing is a nested map — deep-copy both object levels.
       setPanelCellFraming(cloneCellFraming(s.panelCellFraming ?? {}));
+      // Unitized per-cell type is a nested map — deep-copy both object levels.
+      setPanelCellTypes(cloneCellTypes(s.panelCellTypes ?? {}));
       // Per-panel curtain-wall system assignment (flat map) — fresh container.
       setPanelCwType({ ...(s.panelCwType ?? {}) });
       setUnravelHeight(s.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT);
@@ -3536,6 +3881,7 @@ export default function PolylineTool() {
         JSON.stringify(cur.panelMullionsV ?? {}) === JSON.stringify(panelMullionsV) &&
         JSON.stringify(cur.panelMullionsH ?? {}) === JSON.stringify(panelMullionsH) &&
         JSON.stringify(cur.panelCellFraming ?? {}) === JSON.stringify(panelCellFraming) &&
+        JSON.stringify(cur.panelCellTypes ?? {}) === JSON.stringify(panelCellTypes) &&
         JSON.stringify(cur.panelCwType ?? {}) === JSON.stringify(panelCwType) &&
         (cur.unravelHeight ?? DEFAULT_WALL_HEIGHT_FT) === unravelHeight &&
         JSON.stringify(cur.floorPlates ?? []) === JSON.stringify(floorPlates);
@@ -3559,6 +3905,7 @@ export default function PolylineTool() {
         panelMullionsV: elev.panelMullionsV,
         panelMullionsH: elev.panelMullionsH,
         panelCellFraming: elev.panelCellFraming,
+        panelCellTypes: elev.panelCellTypes,
         panelCwType: elev.panelCwType,
         unravelHeight: elev.unravelHeight,
         floorPlates: elev.floorPlates,
@@ -3566,7 +3913,7 @@ export default function PolylineTool() {
       };
       return next;
     });
-  }, [activeSavedId, perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCwType, unravelHeight, floorPlates, currentElevation, location, setSaved]);
+  }, [activeSavedId, perimeter, unravelHeights, unravelCells, panelDivisions, panelDividersH, panelMullionsV, panelMullionsH, panelCellFraming, panelCellTypes, panelCwType, unravelHeight, floorPlates, currentElevation, location, setSaved]);
 
   // Persist whenever the saved list changes (keeps localStorage in sync).
   useEffect(() => {
@@ -4150,6 +4497,9 @@ export default function PolylineTool() {
       // grid cell under the cursor, or null. Drawn tinted so the panel reads as a
       // set of individually navigable cells.
       hoveredCell: hoveredCellRect,
+      // Cells SELECTED for type assignment (Wall Border phase) — drawn with a stronger
+      // fill + outline than the hover tint. Only meaningful in the unravel view.
+      selectedCells: unravelOn ? selectedCells : null,
       // The double-click-focused panel doubles as the SELECTED panel (the active
       // Additive / Subtractive target). The renderer draws its width label in the
       // floor-plate grey to signal the selection.
@@ -4221,6 +4571,8 @@ export default function PolylineTool() {
     // Per-cell hover highlight (Panels phase): repaint as the hovered cell changes.
     focusedCell,
     hoveredCell,
+    // Cell selection (Wall Border phase): repaint as the selected set changes.
+    selectedCells,
     // Assembly phase: repaint as the hovered cell EDGE changes (red highlight).
     hoveredCellEdge,
     cellsForEdge,
@@ -4386,18 +4738,19 @@ export default function PolylineTool() {
     ((panelDivisions[focusedPanel]?.length ?? 0) > 0 ||
       (panelDividersH[focusedPanel]?.length ?? 0) > 0);
 
-  // Type gate: the (scaffolded) Type tool acts on a panel's FRAMES, so it becomes
-  // available only once the FOCUSED panel carries at least one frame — a Stick mullion
-  // offset (vertical OR horizontal) or any Unitized per-cell inset. With no frame there
-  // is nothing to type, so it stays disabled (which also keeps it disabled in the
-  // Building Perimeter tab, where no panel can be focused).
-  const canType =
-    focusedPanel !== null &&
-    ((panelMullionsV[focusedPanel] ?? 0) > 0 ||
-      (panelMullionsH[focusedPanel] ?? 0) > 0 ||
-      Object.values(panelCellFraming[focusedPanel] ?? {}).some(
-        (ins) => ins.top > 0 || ins.right > 0 || ins.bottom > 0 || ins.left > 0,
-      ));
+  // Type gate: the Type tool assigns a glazing type to the SELECTED cells, so the button is
+  // clickable only once the user has selected at least one cell in the Wall Border phase
+  // (click a cell to select it; Shift+click for the whole Material-ID family). Disabled with
+  // nothing selected, in the Building Perimeter tab, and anywhere outside the Wall Border phase.
+  const canType = unravelOn && phase === "panels" && selectedCells.length > 0;
+  // Can the user actually assign a type right now? Identical to canType — a non-empty
+  // selection IS the requirement (the submenu options gate on this).
+  const canAssignType = canType;
+  // Has ANY wall border been assigned at least one cell type? This drives the Type button's
+  // VISIBILITY toggle (eye) independently of `canType`: the eye shows/hides the per-cell hatches
+  // and stays usable whenever there are hatches to toggle — even with no selection (Type button
+  // disabled). Empty panel maps are pruned on clear, so a present entry means a real assignment.
+  const hasAnyCellType = Object.values(panelCellTypes).some((m) => m && Object.keys(m).length > 0);
 
   // AUTO-DISARM ON GATE LOSS: a tool that is armed (blue) must un-arm the moment its
   // enablement condition goes false — e.g. losing the focused panel disables the
@@ -4425,6 +4778,13 @@ export default function PolylineTool() {
   useEffect(() => {
     if (!canType && typeOn) setTypeOn(false);
   }, [canType, typeOn]);
+  // CLEAR THE CELL SELECTION when the user switches the focused wall border or leaves the
+  // unravel view: the selection is per-border (and may include project-wide Shift picks),
+  // so it must not carry over to a different panel or persist after backing out. Selecting
+  // cells does NOT change focusedPanel, so this never fires mid-selection.
+  useEffect(() => {
+    setSelectedCells([]);
+  }, [focusedPanel, unravelOn]);
   // Render / Constraint / Export are unravel-view only — un-arm them on returning to
   // the Building Perimeter tab so none lingers while its button is disabled, and drop
   // the export marquee / selection / popup (all only make sense in the unravel view).
@@ -4460,7 +4820,9 @@ export default function PolylineTool() {
   // perimeter draw/edit fallback. Empty string ⇒ no hint shown. Keep each entry
   // terse and action-first; wording mirrors the ControlsList ("?" help) so the two
   // never disagree — update both together when a control changes.
-  const toolHint = subtractiveOn
+  const toolHint = typeOn
+    ? "Pick a type — applies to the selected cell(s)"
+    : subtractiveOn
     ? "Move cursor to size the split · click to place · hold Shift for horizontal rows"
     : mullionsOn
     ? cwType === "unitized"
@@ -4476,6 +4838,10 @@ export default function PolylineTool() {
     ? "Click to place vertices · click-drag to convert to arc · hold Shift to lock 15° · double-click or Enter to close"
     : phase === "perimeter" && mode === "edit"
     ? "Drag a vertex to move · drag a knob to curve · double-click a vertex for a corner"
+    : // WALL BORDER cell selection cue: a split panel is focused with nothing selected yet,
+      // so coach the click / Shift+click selection that unlocks the Type button.
+      phase === "panels" && selectedCells.length === 0 && panelHasSubtractiveCells(focusedPanel ?? -1)
+    ? "Click a cell to select it · Shift+click selects all cells of that Material ID · then pick a Type"
     : // Show whenever the FOCUSED wall border still has no CW Type (every time the user
       // clicks into a type-less border, not just the very first one), and as the initial
       // onboarding cue in the elevations overview while NO panel has a type yet.
@@ -4828,7 +5194,7 @@ export default function PolylineTool() {
                 if (!unravelOn && !perimeter.closed) return;
                 e.stopPropagation();
                 const modes: typeof statsMode[] = unravelOn
-                  ? ["none", "general", "irradiance", "insolation"]
+                  ? ["none", "general", "irradiance", "insolation", "wwr", "vlt"]
                   : ["none", "general"];
                 // Index off the EFFECTIVE (displayed) mode so cycling in the Building
                 // Perimeter view starts from what's shown — a carried-over solar pick
@@ -4858,7 +5224,7 @@ export default function PolylineTool() {
                 aria-haspopup="true"
                 aria-expanded={statsMenuOpen}
               >
-                Statistics: {effectiveStatsMode === "none" ? "None" : effectiveStatsMode === "general" ? "General" : effectiveStatsMode === "irradiance" ? "Irradiance (W/m²)" : "Insolation (kWh/m²)"} ▾
+                Statistics: {effectiveStatsMode === "none" ? "None" : effectiveStatsMode === "general" ? "General" : effectiveStatsMode === "irradiance" ? "Irradiance (W/m²)" : effectiveStatsMode === "insolation" ? "Insolation (kWh/m²)" : effectiveStatsMode === "wwr" ? "WWR" : "VLT"} ▾
               </button>
               {statsMenuOpen && (
                 <div className="view-menu" role="menu">
@@ -4901,6 +5267,31 @@ export default function PolylineTool() {
                     onClick={() => { setStatsMode("insolation"); setStatsMenuOpen(false); }}
                   >
                     Insolation (kWh/m²)
+                  </button>
+                  {/* WWR is a per-wall read of the glazing types assigned to the panel's
+                      cells, so it only makes sense in the elevation views — disabled in the
+                      Building Perimeter tab, like the solar diagrams. */}
+                  <button
+                    className={`view-menu__btn ${effectiveStatsMode === "wwr" ? "is-active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={effectiveStatsMode === "wwr"}
+                    disabled={!unravelOn}
+                    title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
+                    onClick={() => { setStatsMode("wwr"); setStatsMenuOpen(false); }}
+                  >
+                    WWR
+                  </button>
+                  {/* VLT, like WWR, reads the per-cell glazing types, so it's an elevation-view
+                      read — disabled in the Building Perimeter tab. */}
+                  <button
+                    className={`view-menu__btn ${effectiveStatsMode === "vlt" ? "is-active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={effectiveStatsMode === "vlt"}
+                    disabled={!unravelOn}
+                    title={unravelOn ? undefined : "Available in the elevation views (Unroll Elevations)"}
+                    onClick={() => { setStatsMode("vlt"); setStatsMenuOpen(false); }}
+                  >
+                    VLT
                   </button>
                 </div>
               )}
@@ -5094,27 +5485,93 @@ export default function PolylineTool() {
                 label="framing"
               />
             </div>
-            {/* TYPE — to the right of Framing. A SCAFFOLDED cluster tool (no canvas
-                behaviour yet): enabled only when the focused wall border has at least one
-                frame, armed/blue like the other tools, and disabled in the Building
-                Perimeter tab (no panel focused there). Its eye icon toggles a wired no-op
-                visibility flag for now. */}
+            {/* TYPE — to the right of Framing. Opens a Vision / Spandrel / Opaque chooser
+                (drop-up, same rules as the CW Type menu): enabled once at least one cell is
+                SELECTED in the Wall Border view (click a cell to select; Shift+click for the
+                whole Material-ID family), blue while the menu is open, disabled otherwise.
+                Picking an option types the selection. The eye icon shows / hides the hatches. */}
             <div className="tool-vis-wrap">
               <button
                 className={`type-btn has-vis ${typeOn ? "is-active" : ""}`}
                 onClick={onType}
                 disabled={!canType}
-                aria-pressed={typeOn}
-                title="Set the frame type for the selected wall border"
+                aria-haspopup="true"
+                aria-expanded={typeOn}
+                title="Assign a glazing type to cells (None / Vision / Spandrel / Opaque)"
               >
-                Type
+                Assign ▾
               </button>
+              {/* Visibility (eye) is DECOUPLED from the Type button's gate: it shows / hides the
+                  per-cell hatches and stays clickable whenever ANY wall border has a type
+                  assigned — even with no cell selected (Type button disabled). */}
               <VisToggle
                 visible={typeVisible}
-                disabled={!canType}
+                disabled={!hasAnyCellType}
                 onToggle={() => setTypeVisible((v) => !v)}
-                label="frame types"
+                label="cell types"
               />
+              {typeOn &&
+                (() => {
+                  // The SELECTION's current type — marks the active option. "none" means
+                  // every selected cell is UNTYPED; a CellType means they all share it;
+                  // undefined means the selection is mixed (no single active mark). Computed
+                  // ONCE for the whole menu (the None option marks active on "none").
+                  const activeType = ((): CellType | "none" | undefined => {
+                    if (selectedCells.length === 0) return undefined;
+                    let common: CellType | "none" | undefined;
+                    for (const sc of selectedCells) {
+                      const cells = cellsForEdge(sc.edge);
+                      const idx = cells.findIndex(
+                        (c) =>
+                          Math.abs(c.x0 - sc.x0) < 1e-6 &&
+                          Math.abs(c.y0 - sc.y0) < 1e-6 &&
+                          Math.abs(c.x1 - sc.x1) < 1e-6 &&
+                          Math.abs(c.y1 - sc.y1) < 1e-6,
+                      );
+                      const ty: CellType | "none" =
+                        (idx >= 0 ? panelCellTypes[sc.edge]?.[idx] : undefined) ?? "none";
+                      if (common === undefined) common = ty;
+                      else if (common !== ty) return undefined; // mixed → no mark
+                    }
+                    return common;
+                  })();
+                  return (
+                    <div className="cw-menu cw-menu--type" role="menu">
+                      {/* NONE — clears the type (back to untyped / no hatch). Listed first
+                          as the neutral / reset choice, ahead of the three glazing types. */}
+                      <button
+                        className={`cw-menu__btn cw-menu__btn--type type-none ${activeType === "none" ? "is-active" : ""}`}
+                        role="menuitemradio"
+                        aria-checked={activeType === "none"}
+                        disabled={!canAssignType}
+                        title={canAssignType ? "Clear the glazing type (untyped — no hatch)" : "Select a cell first to assign a type"}
+                        onClick={() => selectCellType("none")}
+                      >
+                        <span className="type-swatch type-swatch--none" aria-hidden="true" />
+                        <span className="type-name">None</span>
+                        <span className="type-vlt">—</span>
+                      </button>
+                      {(Object.keys(CELL_TYPE_LABELS) as CellType[]).map((t) => (
+                        <button
+                          key={t}
+                          className={`cw-menu__btn cw-menu__btn--type type-${t} ${activeType === t ? "is-active" : ""}`}
+                          role="menuitemradio"
+                          aria-checked={activeType === t}
+                          disabled={!canAssignType}
+                          title={canAssignType ? `Assign ${CELL_TYPE_LABELS[t]} — VLT ${Math.round(CELL_TYPE_VLT[t] * 100)}%` : "Select a cell first to assign a type"}
+                          // Applies to the current selection (one cell, or the whole Material-ID family via Shift+click).
+                          onClick={() => selectCellType(t)}
+                        >
+                          <span className={`type-swatch type-swatch--${t}`} aria-hidden="true" />
+                          <span className="type-name">{CELL_TYPE_LABELS[t]}</span>
+                          {/* Industry-standard VLT for this type (CELL_TYPE_VLT) — same value the
+                              VLT statistics view uses, surfaced here so the choice is informed. */}
+                          <span className="type-vlt">VLT {Math.round(CELL_TYPE_VLT[t] * 100)}%</span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
             </div>
           </div>
           {/* UNRAVEL · per-panel height inputs. A DOM overlay (NOT canvas-drawn) of
@@ -5279,6 +5736,121 @@ export default function PolylineTool() {
                 </div>
               );
             })()}
+          {/* WWR STATISTICS OVERLAY — the Window-to-Wall Ratio for ONE wall border, anchored
+              exactly like the General / solar overlays (the SELECTED border if focused, else
+              the LEFT-MOST elevation). Window = the panel's VISION cells; wall = the whole
+              panel rect. Shown both standard ways: Gross Opening (frames/mullions counted as
+              window) and Net Glazing (frames excluded). Same .stats-dropdown chrome / spacing
+              as the General overlay; tracks the viewport so it pans/zooms with the canvas. */}
+          {effectiveStatsMode === "wwr" && unravelOn && unravelResult && unravelResult.segments.length > 0 && (() => {
+            const anchorSeg =
+              (focusedPanel !== null
+                ? unravelResult.segments.find((s) => s.index === focusedPanel)
+                : undefined) ?? unravelResult.segments[0];
+            const w = panelWWR(anchorSeg.index);
+            const pos = toScreen(viewport, { x: anchorSeg.x0, y: 0 });
+            const pct = (r: number) => `${(r * 100).toFixed(1)}%`;
+            // PROVISIONAL: the WWR is only a FINAL figure once every cell is typed. Until then
+            // untyped cells are counted as opaque wall, so flag the result as in-progress (a
+            // "Typed N / M" coverage line + a "*" on the ratios + a footnote) rather than
+            // presenting an incomplete number as authoritative.
+            const untyped = w.cellCount - w.typedCount;
+            const incomplete = untyped > 0;
+            const star = incomplete ? " *" : "";
+            return (
+              <div
+                className="stats-dropdown stats-dropdown--behind"
+                role="region"
+                aria-label="Window-to-wall ratio"
+                style={{ position: "absolute", left: pos.x - 8, top: pos.y + 16, pointerEvents: "none" }}
+              >
+                <div className="stats-dropdown__title">WWR</div>
+                <div className="readout">
+                  <span className="readout__key">Wall area</span>
+                  <span className="readout__val">{fmtArea(w.wallArea, 2)}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Vision cells</span>
+                  <span className="readout__val">{w.visionCount} / {w.cellCount}</span>
+                </div>
+                <div className={`readout ${incomplete ? "readout--provisional" : ""}`}>
+                  <span className="readout__key">WWR · Gross Opening</span>
+                  <span className="readout__val">{pct(w.wwrGross)}{star}</span>
+                </div>
+                <div className={`readout ${incomplete ? "readout--provisional" : ""}`}>
+                  <span className="readout__key">WWR · Net Glazing</span>
+                  <span className="readout__val">{pct(w.wwrNet)}{star}</span>
+                </div>
+                {/* Coverage + provisional warning sit LAST, after all the WWR figures. */}
+                <div className={`readout ${incomplete ? "readout--warn" : ""}`}>
+                  <span className="readout__key">Assigned cells</span>
+                  <span className="readout__val">{w.typedCount} / {w.cellCount}{incomplete ? " ⚠" : ""}</span>
+                </div>
+                {incomplete && (
+                  <div className="stats-dropdown__note">
+                    * provisional — {untyped} cell{untyped === 1 ? "" : "s"} unassigned
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          {/* VLT STATISTICS OVERLAY — the Visible Light Transmittance of ONE wall border,
+              anchored exactly like the General / WWR / solar overlays (the SELECTED border if
+              focused, else the LEFT-MOST elevation). Lists the industry-standard VLT assigned
+              to each cell type (Vision admits light; Spandrel / Opaque are 0) and the wall's
+              EFFECTIVE VLT — the glass-area-weighted transmittance over the whole panel (the
+              daylighting effective aperture). Same .stats-dropdown chrome / spacing as the
+              General overlay; tracks the viewport so it pans/zooms with the canvas. */}
+          {effectiveStatsMode === "vlt" && unravelOn && unravelResult && unravelResult.segments.length > 0 && (() => {
+            const anchorSeg =
+              (focusedPanel !== null
+                ? unravelResult.segments.find((s) => s.index === focusedPanel)
+                : undefined) ?? unravelResult.segments[0];
+            const v = panelVLT(anchorSeg.index);
+            const pos = toScreen(viewport, { x: anchorSeg.x0, y: 0 });
+            const pct = (r: number) => `${(r * 100).toFixed(1)}%`;
+            // PROVISIONAL: like WWR, the effective aperture is only FINAL once every cell is
+            // typed (untyped cells admit no light here, biasing the figure low). Flag coverage
+            // + mark the computed aperture with "*" until the wall border is fully typed.
+            const untyped = v.cellCount - v.typedCount;
+            const incomplete = untyped > 0;
+            return (
+              <div
+                className="stats-dropdown stats-dropdown--behind"
+                role="region"
+                aria-label="Visible light transmittance"
+                style={{ position: "absolute", left: pos.x - 8, top: pos.y + 16, pointerEvents: "none" }}
+              >
+                <div className="stats-dropdown__title">VLT</div>
+                <div className="readout">
+                  <span className="readout__key">Vision</span>
+                  <span className="readout__val">{pct(v.visionVLT)}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Spandrel</span>
+                  <span className="readout__val">{pct(v.spandrelVLT)}</span>
+                </div>
+                <div className="readout">
+                  <span className="readout__key">Opaque</span>
+                  <span className="readout__val">{pct(v.opaqueVLT)}</span>
+                </div>
+                <div className={`readout ${incomplete ? "readout--provisional" : ""}`}>
+                  <span className="readout__key">Effective aperture</span>
+                  <span className="readout__val">{pct(v.effectiveAperture)}{incomplete ? " *" : ""}</span>
+                </div>
+                {/* Coverage + provisional warning sit LAST, after all the VLT figures. */}
+                <div className={`readout ${incomplete ? "readout--warn" : ""}`}>
+                  <span className="readout__key">Assigned cells</span>
+                  <span className="readout__val">{v.typedCount} / {v.cellCount}{incomplete ? " ⚠" : ""}</span>
+                </div>
+                {incomplete && (
+                  <div className="stats-dropdown__note">
+                    * provisional — {untyped} cell{untyped === 1 ? "" : "s"} unassigned
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {/* PERIMETER STATISTICS OVERLAY — the Building Perimeter tab counterpart of the
               unravel overlay above. Shows footprint stats for the CLOSED perimeter, in the
               same .stats-dropdown style. Anchored at the outline's LEFT-most x and BOTTOM-
@@ -5638,11 +6210,11 @@ function ControlsList() {
       <li><b>Floor Lines</b> (bottom-left, unravel view) — enabled once the selected panel has a <b>CW Type</b> · <b>click</b> arms the tool to drop horizontal level lines (click the canvas to add, click a line to remove; Esc or re-click to finish) · the <b>eye icon</b> on the button's right edge shows / hides all floor lines without deleting them · the ground <b>0′</b> line is permanent (always present, can't be deleted)</li>
       <li><b>Floor-plate snap</b> after the first plate above ground, new plates snap to multiples of that floor-to-floor height · <b>Shift</b> bypasses the snap (free / grid placement)</li>
       <li><b>Unravel:</b> drag a panel top to resize</li>
-      <li><b>Layer navigation:</b> a <b>single click</b> on a panel/cell drills one layer DEEPER (Unroll Elevations → Wall Border → Cells) · <b>click a different panel</b> (while in Wall Border/Cells) switches focus straight to it · <b>click the empty canvas</b> to step one layer BACK (Cells → Wall Border → Unroll Elevations) · it stops at Unroll Elevations — use the <b>Building Perimeter</b> tab to return to the footprint · the top tabs jump directly to a layer · Esc also steps back one layer</li>
+      <li><b>Layer navigation:</b> a <b>single click</b> on a panel drills DEEPER (Unroll Elevations → Wall Border) · in the <b>Wall Border</b> tab a click on a cell <b>selects it for typing</b> (the click-to-zoom-into-a-cell drill is currently off) · use the <b>Cells</b> tab to enter the single-cell zoom · <b>click a different panel</b> (while in Wall Border/Cells) switches focus straight to it · <b>click the empty canvas</b> to step one layer BACK (Cells → Wall Border → Unroll Elevations) · it stops at Unroll Elevations — use the <b>Building Perimeter</b> tab to return to the footprint · the top tabs jump directly to a layer · Esc also steps back one layer</li>
       <li><b>Hover a cell</b> (Panels view, a split panel zoomed-in) highlights the individual grid cell under the cursor, showing the panel is subdivided into navigable cells</li>
       <li><b>Wall Border view</b> dimensions the focused panel's grid: a <b>width</b> label per column along the top, and a <b>height</b> label per row along the left (the panel's height field is hidden here — drag the top edge to resize)</li>
       <li><b>Cells</b> (top nav) jumps straight to the cells view — the top-left-most cell of the focused panel, or of the first panel with centerlines · enabled once the sketch is saved and <b>any</b> panel has centerlines (Centerlines tool), from any tab</li>
-      <li><b>Click a cell</b> (Wall Border or Cells view) zooms into that grid cell, going one layer deeper</li>
+      <li><b>Click a cell</b> (<b>Wall Border</b> view) selects it for type assignment (<b>Shift+click</b> = all cells of that Material ID) — the click-to-zoom-into-a-cell drill is currently disabled; use the <b>Cells</b> tab to enter the single-cell zoom</li>
       <li><b>Cells view</b> dimensions the selected cell on all four sides: a <b>width</b> label on the top and bottom edges, a <b>height</b> label on the left and right edges</li>
       <li><b>Hover an edge</b> (Assembly view) of the selected cell highlights that edge <b>red</b> (top / right / bottom / left, one at a time) to mark it as selected</li>
       <li><b>Click a panel</b> (Unroll Elevations) selects + zooms it (its width/height labels turn grey) and enables the <b>CW Type</b> button (bottom-left cluster) — the only cluster button available until a type is assigned · click the empty canvas (or Esc) to step back out</li>
@@ -5650,7 +6222,9 @@ function ControlsList() {
       <li><b>CW Type</b> (first in the bottom-left cluster) assigns the curtain-wall system <b>per panel</b> — select a panel, then click (chevron ▾ marks the menu) to choose <b>Stick System</b> or <b>Unitized System</b> · the button shows the selected panel's "CW Type: <i>name</i>" · assigning a type <b>unlocks the rest of the row — Floor Lines, Centerlines, Framing</b> (all stay disabled until a panel's CW Type is set) · a panel holds only ONE system, so switching its type <b>clears that panel's framing of the other system</b> (its centerlines are kept)</li>
       <li><b>Framing</b> (last in the bottom-left cluster) becomes available once the selected panel has a CW Type, and acts in the <b>Wall Border</b> tab · with the <b>Stick System</b>, hover a panel's <b>vertical</b> or <b>horizontal</b> grid lines (the hovered set highlights, since they adjust together) then <b>click-drag</b> to set a framing (mullion) offset to <b>either side</b> in <b>0.25′</b> increments — dragging one vertical line offsets ALL vertical lines in that panel the same (likewise for horizontal) · with the tool armed, <b>clicking a different wall border</b> (away from this panel's lines) reframes to it with <b>Framing still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · <b>clicking the empty white canvas</b> (off any panel) deselects the tool · the <b>eye icon</b> on the button's right edge shows / hides all framing on the canvas without deleting it</li>
       <li>with the <b>Unitized System</b>, hover a cell's centerlines to highlight the <b>single nearest edge</b> of the cell under the cursor, then <b>click-drag</b> to inset that one edge <b>into the cell</b> in <b>0.25′</b> increments · hold <b>Shift</b> while dragging to inset <b>all four edges</b> of that cell together · each framed edge draws the solid frame face inset into the cell AND turns the affected <b>centerline segment solid</b> on top of the dashed centerline (the framed mullion) · the edit <b>mirrors live to every same-shape (Material ID) cell</b> across all elevations/panels — editing one cell updates all identical cells project-wide (see the <b>View</b> button's Material ID colours / <b>Unique cells</b> count for the groups)</li>
-      <li><b>Type</b> (right of Framing) becomes available once the selected wall border has <b>at least one frame</b> created · arms/blue like the other cluster tools and is disabled in the <b>Building Perimeter</b> tab · the <b>eye icon</b> on its right edge will show / hide the frame types on the canvas <i>(scaffolded — assignment + rendering are not wired up yet)</i></li>
+      <li><b>Select cells</b> (<b>Wall Border</b> tab) — <b>click a cell</b> to select just that one (it highlights blue); <b>click it again</b> to deselect it · <b>Shift+click</b> a cell to select <b>every cell sharing its Material ID</b> across the whole project · a plain click replaces the previous selection · this is what unlocks the <b>Assign</b> button</li>
+      <li><b>Assign</b> (right of Framing) opens a <b>None · Vision · Spandrel · Opaque</b> submenu (drop-up, same rules as the <b>CW Type</b> menu) to assign a glazing type to the <b>selected cells</b> · enabled only while <b>at least one cell is selected</b> (Wall Border tab), blue while the menu is open · each type paints its own <b>hatch</b> on the cell · the <b>eye icon</b> on its right edge shows / hides those hatches and stays clickable <b>whenever any wall border has a type assigned</b> — even with no cell selected (when the Assign button itself is disabled)</li>
+      <li><b>Pick a type</b> (with cells selected) assigns it to <b>every selected cell</b> — one cell, or the whole Material-ID family if you Shift+selected it — in a single undoable step · <b>None</b> clears the type (back to untyped, no hatch) · the active option is marked when the whole selection already shares one type</li>
       <li><b>Centerlines</b> (enabled once the selected panel has a <b>CW Type</b>) arms the divide tool: hover recommends splitting the panel into <b>equal-width columns</b> (move the cursor to pick the iteration — fewer/wider or more/narrower columns) with a live dimension showing the column width · <b>click</b> places that even split · <b>hold Shift</b> flips the split to <b>equal-height rows</b> (horizontal, with a live row-height dimension); if <b>floor plates</b> cross the panel the rows snap to them — an array line lands on every floor plate and each band between plates is evenly subdivided · with the tool armed, <b>clicking a different wall border</b> reframes to it with <b>Centerlines still in hand</b>, so you can move between borders and keep editing without disarming and re-selecting · <b>clicking the empty white canvas</b> (off any panel) deselects the tool · the <b>eye icon</b> on the button's right edge shows / hides all centerlines on the canvas without deleting them · Esc or re-click the button to finish</li>
       <li><b>Erase</b> (bottom-right cluster, just left of the <b>?</b> help button) arms the delete tool and works in BOTH views · <b>Building Perimeter view:</b> hover a perimeter <b>vertex</b> (it turns <b>red</b>) and <b>click</b> to delete it, or <b>click-drag</b> across several vertices to remove them all in one stroke (committed as one undo step; dropping below 3 points reopens the shape) · hover a perimeter <b>edge</b> away from its corners (closed shape only) to highlight that segment <b>red</b> and <b>click</b> to remove it — <b>reopening the loop there while keeping both vertices</b> — or <b>click-drag</b> along the boundary to erase several segments at once · any vertex left <b>alone</b> by losing both its walls (e.g. between two erased edges) is <b>auto-deleted</b> too (it pre-highlights red) ·<b>Unravel view:</b> <b>hover</b> near a panel's centerline <em>or</em> a floor plate to highlight it, <b>click</b> deletes it, and <b>click-drag</b> across multiple lines erases them all in one stroke (a fast drag still catches every line on the path), committed as one undo step · erasing a panel's centerline also <b>clears that panel's framing</b> on that axis (the same way adding a centerline does — re-apply framing afterwards), so no frame bars linger along the border without their centerlines · the default <b>0′ ground floor line</b> can't be deleted · Esc or re-click the button to finish · mutually exclusive with Centerlines/Framing/Floor Lines</li>
       <li><b>Dim</b> (bottom-right cluster, right of Erase) — clicking the word does nothing yet; its <b>eye icon</b> is the single source of truth for the on-canvas <b>dimensions</b> (the panel width / per-column-row / cell labels and the height input fields across the <b>Elevations</b>, <b>Wall Border</b>, and <b>Cells</b> tabs) · click the eye to show / hide them all (visible by default) · disabled in the <b>Building Perimeter</b> tab · <b>no view (Clean / Shadows) auto-hides dimensions</b> — only the Dim eye does</li>
@@ -5681,7 +6255,7 @@ function ViewModesInfo() {
       <li><b>Material ID</b> tints every grid cell by its geometric <b>shape</b>, so identical cells across the whole project share one colour and number. <span className="help__how">How: each cell's width × height is rounded to ~0.001′ and bucketed into a shape group; the group index maps to a hue via the golden angle (137.5°), and identical cells fan out in saturation. The Statistics <b>Unique cells</b> count is the number of distinct groups.</span></li>
       <li><b>Orientation Heatmap</b> colours each cell by the <b>compass direction</b> its glass faces and prints that facade's <b>live direct-sun hit %</b> beneath the cardinal. <span className="help__how">How: the facade's outward normal (from the perimeter's winding) is rotated by the Solar Study's North into a true bearing, then mapped onto a cold→hot ramp (N blue · E cyan · S yellow · W red). The % is the cosine of the sun's angle of incidence on the wall — cos(altitude)·cos(sun-azimuth − wall-bearing) at the Solar Study's current day + hour — shown as 100% (sun square-on) down to 0% (grazing or sun behind the wall), or "—" when the sun is below the horizon.</span></li>
       <li><b>Clean</b> a presentation view — the glass panels fill <b>white</b> behind the framing. <span className="help__how">How: the same geometry as Technical with cell infill forced white; the per-button visibility toggles still apply.</span></li>
-      <li><b>Shadows</b> a 2.5D presentation — every framing bar reads as raised and casts a hard <b>drop shadow</b> onto the adjacent glass. <span className="help__how">How: built on Clean — each frame bar projects a shadow quad onto neighbouring glass only (never onto frame infill), its length scaling with zoom; the geometry is drawn monochrome while hover highlights stay coloured.</span></li>
+      <li><b>Shadows</b> a 2.5D presentation — every framing bar reads as raised and casts a hard <b>drop shadow</b> onto the adjacent glass. <span className="help__how">How: built on Clean — each frame bar projects a shadow quad onto neighbouring glass only (never onto frame infill), its length scaling with zoom; the geometry is drawn monochrome while hover highlights stay coloured. <b>Opaque</b> cells read as <b>flush with the frame</b>, so no shadow falls on them (Vision and Spandrel glass is recessed and still catches the shadow).</span></li>
     </ul>
   );
 }
@@ -5697,6 +6271,8 @@ function StatisticsInfo() {
       <li><b>General</b> live geometric totals for the current view. <span className="help__how">How: read straight off the drawn geometry — the <b>Building Perimeter</b> shows wall count, perimeter length, footprint area (shoelace formula), and bounding extents; the <b>unravel</b> views show segment count, unwrapped length, total facade area (Σ length × height), and the unique-cell count.</span></li>
       <li><b>Irradiance (W/m²)</b> a Ladybug-style <b>month × hour</b> heatmap of clear-sky solar power landing on the selected wall. <span className="help__how">How: for each month's representative day and each hour, the sun's altitude/azimuth (spherical astronomy from the Solar Study's latitude + North) drive a Hottel clear-sky beam transmittance; wall irradiance = direct-normal·cos(incidence) (beam, only when the sun faces the wall) + isotropic sky-diffuse + ground-reflected, coloured cold→hot. Clear-sky only (no weather file yet).</span></li>
       <li><b>Insolation (kWh/m²)</b> the energy companion — a <b>monthly bar chart</b> of the solar energy that same wall receives. <span className="help__how">How: integrates the Irradiance over each representative day and scales by the days in the month → kWh/m² per month; summed over the year it gives the annual <b>kWh/m²·yr</b> total shown on both diagrams.</span></li>
+      <li><b>WWR</b> the <b>Window-to-Wall Ratio</b> of the selected wall border (elevation views only). <span className="help__how">How: the WINDOW is the panel's <b>Vision</b> cells (Spandrel, Opaque, and unassigned cells read as wall, set with the <b>Assign</b> tool); the WALL is the whole panel (width × height). Reported two standard ways — <b>Gross Opening</b> counts each vision cell's full opening (frames/mullions included), <b>Net Glazing</b> counts only the glass infill (frames/mullions excluded). An <b>Assigned N / M</b> line at the bottom shows coverage; until every cell is assigned a type the ratios are flagged <b>provisional</b> (marked <b>*</b>), since unassigned cells are still being counted as wall.</span></li>
+      <li><b>VLT</b> the <b>Visible Light Transmittance</b> of the selected wall border (elevation views only). <span className="help__how">How: each cell type carries an industry-standard VLT — <b>Vision</b> ≈ 70% (clear/low-E vision glass), <b>Spandrel</b> and <b>Opaque</b> = 0% (no visible transmittance). The <b>Effective aperture</b> is the glass-area-weighted transmittance spread over the whole panel (= net WWR × glazing VLT), the standard daylighting metric — light passes only through the actual glass infill. Like WWR, it shows an <b>Assigned N / M</b> coverage line at the bottom and is flagged <b>provisional</b> (<b>*</b>) until the wall border is fully assigned.</span></li>
     </ul>
   );
 }
